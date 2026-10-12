@@ -124,7 +124,7 @@ RFB.prototype._negotiateProtocolVersion = function () {
             this._ardServerFlags = 0;
             this._ardCapabilityBitmap = null;
             this._ardSessionSelectNeeded = false;
-            this._ardQualityPreset = this._ardQualityPreset ?? 'thousands';
+            this._ardQualityPreset = this._ardQualityPreset ?? 'adaptive';
             this._ardCurtainActive = false;
 
             // Register ARD pixel decoders
@@ -403,7 +403,7 @@ RFB.prototype._sendEncodings = function () {
         millions:  [encodings.encodingZRLE, encodings.encodingZlib, encodings.encodingRaw],
         adaptive:  [encodingArdMVS, encodingArdThousands, encodings.encodingZRLE, encodings.encodingZlib, encodings.encodingRaw],
     };
-    const imageEncs = presetEncodings[this._ardQualityPreset] || presetEncodings.thousands;
+    const imageEncs = presetEncodings[this._ardQualityPreset] || presetEncodings.adaptive;
     for (const enc of imageEncs) {
         encs.push(enc);
     }

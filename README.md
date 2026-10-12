@@ -17,7 +17,7 @@ A browser-based client for macOS Screen Sharing (protocol version `003.889`). Al
 - Control modes: observe, shared, exclusive
 
 **UI Controls**
-- Quality slider with 5 presets (halftone, gray, thousands, adaptive, millions)
+- Quality slider with 5 presets (adaptive, millions, thousands, gray, halftone)
 - Clipboard sync, send, and receive
 - Curtain screen lock with custom message
 - Remote user avatar display
@@ -51,7 +51,7 @@ open http://localhost:6088/ard.html
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `theme` | string | `novnc` | UI theme: `novnc`, `novnc-ard`, `noard` |
-| `ardQuality` | string | `thousands` | Initial quality preset: `halftone`, `gray`, `thousands`, `millions`, `adaptive` |
+| `ardQuality` | string | `adaptive` | Initial quality preset: `halftone`, `gray`, `thousands`, `millions`, `adaptive` |
 | `ardEncryption` | integer | `2` | Encryption mode: `1` = keystroke-only, `2` = full tunnel |
 | `ardControlMode` | integer | `1` | Control mode: `0` = observe, `1` = shared, `2` = exclusive |
 | `virtualLogin` | integer | `1` | Session select: `0` = always share, `1` = show picker, `2` = always virtual |
@@ -101,7 +101,7 @@ open http://localhost:6088/ard.html
 | `gray` | ArdGray16, ZRLE, Zlib, Raw | 4-bit (16 grays) |
 | `thousands` | ArdThousands, ZRLE, Zlib, Raw | 16-bit (RGB555) |
 | `millions` | ZRLE, Zlib, Raw | 24-bit (full color) |
-| `adaptive` | ArdMVS, ArdThousands, ZRLE, Zlib, Raw | 24-bit, lossy (DCT) |
+| `adaptive` (default) | ArdMVS, ArdThousands, ZRLE, Zlib, Raw | 24-bit, lossy (DCT) |
 
 All presets include standard fallback encodings (CopyRect, Hextile, RRE) and ARD pseudo-encodings (CursorPos, DisplayInfo, UserInfo, SessionEncryption, CursorAlpha, DisplayInfo2, DeviceInfo, KeyboardInput).
 
