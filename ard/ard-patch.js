@@ -124,7 +124,7 @@ RFB.prototype._negotiateProtocolVersion = function () {
             this._ardServerFlags = 0;
             this._ardCapabilityBitmap = null;
             this._ardSessionSelectNeeded = false;
-            this._ardQualityPreset = 'thousands';
+            this._ardQualityPreset = this._ardQualityPreset ?? 'thousands';
             this._ardCurtainActive = false;
 
             // Register ARD pixel decoders
