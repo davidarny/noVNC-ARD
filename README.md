@@ -93,6 +93,10 @@ open http://localhost:6088/ard.html
 | `ardcurtainchange` | `{ active }` | Curtain lock state changed |
 | `ardencryptionstate` | `{ state }` | Session encryption activated |
 
+## Versioning
+
+Versions look like `1.0.0+1.6.0`: the noVNC-ARD version, then the version of the bundled noVNC submodule as [build metadata](https://semver.org/#spec-item-10). The first part follows semantic versioning for the ARD layer. The second part changes only when the submodule is updated, and does not affect version ordering.
+
 ## Quality Presets
 
 | Preset | Encoding List | Pixel Depth |
