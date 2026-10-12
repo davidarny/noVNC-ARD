@@ -172,9 +172,9 @@
         const ardVirtualLogin = (virtualLoginParam === 0 || virtualLoginParam === 2)
             ? virtualLoginParam : 1;
 
-        // ardQuality: halftone, gray, thousands (default), millions
+        // ardQuality: halftone, gray, thousands (default), millions, adaptive
         const ardQualityParam = getParamCI('ardQuality');
-        const ardInitialQuality = ['halftone', 'gray', 'thousands', 'millions'].includes(ardQualityParam)
+        const ardInitialQuality = ['halftone', 'gray', 'thousands', 'millions', 'adaptive'].includes(ardQualityParam)
             ? ardQualityParam : 'thousands';
 
         // ardControlMode: 0=observe, 1=shared control (default), 2=exclusive
@@ -513,11 +513,28 @@
             const rect = track.getBoundingClientRect();
             const ratio = (clientY - rect.top) / rect.height;
             const clamped = Math.max(0, Math.min(1, ratio));
-            const presets = ['millions', 'thousands', 'gray', 'halftone'];
+            const presets = ['millions', 'adaptive', 'thousands', 'gray', 'halftone'];
             const idx = Math.min(presets.length - 1,
                                   Math.floor(clamped * presets.length));
             return presets[idx];
         }
+
+        // Label the stop under the pointer while hovering or dragging
+        function ardShowQualityHint(preset) {
+            document.querySelectorAll('.noVNC_quality_stop')
+                .forEach((s) => {
+                    s.classList.toggle('noVNC_hint',
+                                       s.dataset.preset === preset);
+                });
+        }
+        ['pointerdown', 'pointermove'].forEach((type) => {
+            document.getElementById('noVNC_quality_track')
+                .addEventListener(type, (e) => {
+                    ardShowQualityHint(ardQualityFromY(e.currentTarget, e.clientY));
+                });
+        });
+        document.getElementById('noVNC_quality_track')
+            .addEventListener('pointerleave', () => ardShowQualityHint(null));
 
         document.getElementById('noVNC_quality_track')
             .addEventListener('pointerdown', (e) => {
@@ -1029,10 +1046,11 @@
                     <img src="ard/images/quality-high.svg" alt="High"
                         class="noVNC_quality_icon">
                     <div id="noVNC_quality_track">
-                        <div class="noVNC_quality_stop" data-preset="millions"></div>
-                        <div class="noVNC_quality_stop" data-preset="thousands"></div>
-                        <div class="noVNC_quality_stop" data-preset="gray"></div>
-                        <div class="noVNC_quality_stop" data-preset="halftone"></div>
+                        <div class="noVNC_quality_stop" data-preset="millions" data-hint="Full Color · 24-bit, lossless"></div>
+                        <div class="noVNC_quality_stop" data-preset="adaptive" data-hint="Adaptive · 24-bit, lossy (MVS)"></div>
+                        <div class="noVNC_quality_stop" data-preset="thousands" data-hint="Thousands · 16-bit color"></div>
+                        <div class="noVNC_quality_stop" data-preset="gray" data-hint="Grayscale · 16 grays"></div>
+                        <div class="noVNC_quality_stop" data-preset="halftone" data-hint="Black &amp; White · 1-bit"></div>
                     </div>
                     <img src="ard/images/quality-low.svg" alt="Low"
                         class="noVNC_quality_icon">

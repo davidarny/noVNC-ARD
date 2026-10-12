@@ -31,11 +31,13 @@ import { SHA1 } from './crypto/sha1.js';
 import ArdHalftoneDecoder from './decoders/zlib-halftone.js';
 import ArdGray16Decoder from './decoders/zlib-16gray.js';
 import ArdThousandsDecoder from './decoders/zlib-thousands.js';
+import ArdMVSDecoder from './decoders/mvs.js';
 
 import {
     encodingArdHalftone,
     encodingArdGray16,
     encodingArdThousands,
+    encodingArdMVS,
     clientInitARD,
     securityTypeRSATunnel,
     serverFlagSessionSelect,
@@ -129,6 +131,7 @@ RFB.prototype._negotiateProtocolVersion = function () {
             this._decoders[encodingArdHalftone]  = new ArdHalftoneDecoder();
             this._decoders[encodingArdGray16]    = new ArdGray16Decoder();
             this._decoders[encodingArdThousands] = new ArdThousandsDecoder();
+            this._decoders[encodingArdMVS]       = new ArdMVSDecoder();
             this._ardControlMode = this._ardControlMode ?? 1; // 0=observe, 1=control, 2=exclusive
             this._ardClipboardSessionId = 0;
 
@@ -398,6 +401,7 @@ RFB.prototype._sendEncodings = function () {
         gray:      [encodingArdGray16, encodings.encodingZRLE, encodings.encodingZlib, encodings.encodingRaw],
         thousands: [encodingArdThousands, encodings.encodingZRLE, encodings.encodingZlib, encodings.encodingRaw],
         millions:  [encodings.encodingZRLE, encodings.encodingZlib, encodings.encodingRaw],
+        adaptive:  [encodingArdMVS, encodingArdThousands, encodings.encodingZRLE, encodings.encodingZlib, encodings.encodingRaw],
     };
     const imageEncs = presetEncodings[this._ardQualityPreset] || presetEncodings.thousands;
     for (const enc of imageEncs) {
@@ -1238,7 +1242,7 @@ Object.defineProperty(RFB.prototype, 'ardControlMode', {
 Object.defineProperty(RFB.prototype, 'ardQualityPreset', {
     get() { return this._ardQualityPreset; },
     set(preset) {
-        const valid = ['halftone', 'gray', 'thousands', 'millions'];
+        const valid = ['halftone', 'gray', 'thousands', 'millions', 'adaptive'];
         if (!valid.includes(preset)) return;
         if (this._ardQualityPreset === preset) return;
         this._ardQualityPreset = preset;
@@ -2336,7 +2340,7 @@ function ardUpdateInfoPanel(rfb) {
         ? rfb._ardDisplays.map(d => d.w + 'x' + d.h).join(', ') : '—');
     set('ard_info_encryption', rfb._ardEncryptionEnabled
         ? 'AES-128-CBC' : (rfb._ardAuthKey ? 'Keystroke only' : 'None'));
-    const qualityLabels = { halftone: 'Halftone', gray: 'Gray16', thousands: 'Thousands', millions: 'Full Color' };
+    const qualityLabels = { halftone: 'Halftone', gray: 'Gray16', thousands: 'Thousands', millions: 'Full Color', adaptive: 'Adaptive' };
     set('ard_info_quality', qualityLabels[rfb._ardQualityPreset] || rfb._ardQualityPreset);
     const modeLabels = { 0: 'Observe', 1: 'Control', 2: 'Exclusive' };
     set('ard_info_mode', modeLabels[rfb._ardControlMode] || 'Control');

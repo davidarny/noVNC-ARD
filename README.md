@@ -17,7 +17,7 @@ A browser-based client for macOS Screen Sharing (protocol version `003.889`). Al
 - Control modes: observe, shared, exclusive
 
 **UI Controls**
-- Quality slider with 4 presets (halftone, gray, thousands, millions)
+- Quality slider with 5 presets (halftone, gray, thousands, adaptive, millions)
 - Clipboard sync, send, and receive
 - Curtain screen lock with custom message
 - Remote user avatar display
@@ -28,6 +28,7 @@ A browser-based client for macOS Screen Sharing (protocol version `003.889`). Al
 - Halftone (encoding 1000) — 1-bit black/white, zlib-compressed
 - Gray16 (encoding 1001) — 4-bit 16 grays, zlib-compressed
 - Thousands (encoding 1002) — 16-bit RGB555, zlib-compressed
+- MVS (encoding 1011) — Apple's adaptive-quality codec: 8×8 DCT tiles with a tile cache and partial updates
 
 **Keyboard**
 - Double-backtick shortcut for full screen refresh
@@ -50,7 +51,7 @@ open http://localhost:6088/ard.html
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `theme` | string | `novnc` | UI theme: `novnc`, `novnc-ard`, `noard` |
-| `ardQuality` | string | `thousands` | Initial quality preset: `halftone`, `gray`, `thousands`, `millions` |
+| `ardQuality` | string | `thousands` | Initial quality preset: `halftone`, `gray`, `thousands`, `millions`, `adaptive` |
 | `ardEncryption` | integer | `2` | Encryption mode: `1` = keystroke-only, `2` = full tunnel |
 | `ardControlMode` | integer | `1` | Control mode: `0` = observe, `1` = shared, `2` = exclusive |
 | `virtualLogin` | integer | `1` | Session select: `0` = always share, `1` = show picker, `2` = always virtual |
@@ -80,7 +81,7 @@ open http://localhost:6088/ard.html
 | Property | Type | Access | Description |
 |----------|------|--------|-------------|
 | `ardControlMode` | integer | read/write | `0` = observe, `1` = shared, `2` = exclusive |
-| `ardQualityPreset` | string | read/write | `halftone`, `gray`, `thousands`, `millions` |
+| `ardQualityPreset` | string | read/write | `halftone`, `gray`, `thousands`, `millions`, `adaptive` |
 | `ardCurtainActive` | boolean | read-only | Whether remote screen is curtain-locked |
 
 ### Events
@@ -100,6 +101,7 @@ open http://localhost:6088/ard.html
 | `gray` | ArdGray16, ZRLE, Zlib, Raw | 4-bit (16 grays) |
 | `thousands` | ArdThousands, ZRLE, Zlib, Raw | 16-bit (RGB555) |
 | `millions` | ZRLE, Zlib, Raw | 24-bit (full color) |
+| `adaptive` | ArdMVS, ArdThousands, ZRLE, Zlib, Raw | 24-bit, lossy (DCT) |
 
 All presets include standard fallback encodings (CopyRect, Hextile, RRE) and ARD pseudo-encodings (CursorPos, DisplayInfo, UserInfo, SessionEncryption, CursorAlpha, DisplayInfo2, DeviceInfo, KeyboardInput).
 
@@ -119,6 +121,12 @@ noVNC-ARD/
       zlib-halftone.js          1-bit halftone decoder (encoding 1000)
       zlib-16gray.js            4-bit gray decoder (encoding 1001)
       zlib-thousands.js         16-bit RGB555 decoder (encoding 1002)
+      mvs.js                    MVS decoder (encoding 1011)
+      mvs-bitstream.js          MVS bit reader
+      mvs-rice.js               MVS Rice codes (full updates)
+      mvs-huffman.js            MVS Huffman AC codes (partial updates)
+      mvs-idct.js               MVS inverse DCT (libjpeg islow)
+      mvs-tables.js             MVS zigzag, quantization and color tables
     images/
       binoculars.svg            Observe mode icon (Lucide, ISC)
       cmd.svg                   Mac Command key icon (Lucide, ISC)
@@ -160,7 +168,7 @@ Detection (`003.889` version string), Apple-extended ClientInit (`0xC1`), Extend
 **Layer 2 — Features**
 - *Auth & Encryption:* Type 30 DH, Type 33 RSATunnel, EncryptedEvent (keystroke AES-128-ECB), full session encryption (AES-128-CBC + SHA-1)
 - *Session:* Session Select sub-protocol, clipboard sync/send/receive, curtain screen lock, control mode switching, remote user avatar, quality preset switching
-- *Pixel Decoders:* Zlib-compressed ARD formats converted to RGBA for canvas
+- *Pixel Decoders:* Zlib-compressed ARD formats and the MVS DCT codec, converted to RGBA for canvas
 
 **Crypto Primitives**
 Pure JavaScript — AES-128, SHA-1, PKCS#1 DER parsing. No external dependencies.

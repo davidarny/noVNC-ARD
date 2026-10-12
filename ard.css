@@ -122,6 +122,8 @@
     background-color: #313131;
     border: none;
     padding: 12px 10px;
+    /* the hover label sits outside the panel */
+    overflow: visible;
 }
 #noVNC_quality_wrap {
     display: flex;
@@ -176,6 +178,25 @@
     height: 2px;
     background: rgba(255, 255, 255, 0.35);
     border-radius: 1px;
+}
+/* Label for the stop under the pointer, shown outside the panel */
+.noVNC_quality_stop.noVNC_hint::before {
+    content: attr(data-hint);
+    position: absolute;
+    left: calc(100% + 18px);
+    top: 0;
+    padding: 0 8px;
+    line-height: 20px;
+    font-size: 12px;
+    white-space: nowrap;
+    color: #e0e0e0;
+    background-color: #313131;
+    border-radius: 4px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+.noVNC_right .noVNC_quality_stop.noVNC_hint::before {
+    left: auto;
+    right: calc(100% + 18px);
 }
 /* Active stop — pill-shaped indicator */
 .noVNC_quality_stop.noVNC_active::after {
