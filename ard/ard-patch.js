@@ -34,12 +34,16 @@ import ArdThousandsDecoder from './decoders/zlib-thousands.js';
 import ArdMVSDecoder from './decoders/mvs.js';
 import { parseDisplayInfo2, setDisplayBytes, displayRole,
          reconcileSelection } from './display-info.js';
+import { HpSession } from './hp/session.js';
+import { VideoSink } from './hp/video-sink.js';
 
 import {
     encodingArdHalftone,
     encodingArdGray16,
     encodingArdThousands,
     encodingArdMVS,
+    encodingArdProMode,
+    pseudoEncodingArdMediaStream,
     clientInitARD,
     securityTypeRSATunnel,
     serverFlagSessionSelect,
@@ -94,6 +98,7 @@ const _origNegotiateServerInit = RFB.prototype._negotiateServerInit;
 const _origSendEncodings = RFB.prototype._sendEncodings;
 const _origNormalMsg = RFB.prototype._normalMsg;
 const _origHandleRect = RFB.prototype._handleRect;
+const _origUpdateConnectionState = RFB.prototype._updateConnectionState;
 const _origHandleSecurityResult = RFB.prototype._handleSecurityResult;
 const _origSendKey = RFB.prototype.sendKey;
 const _origIsSupportedSecurityType = RFB.prototype._isSupportedSecurityType;
@@ -410,6 +415,15 @@ RFB.prototype._sendEncodings = function () {
 
     const encs = [];
 
+    // High Performance: 1010 first and 1110 last ask the server to open the
+    // media stream negotiation. The pixel encodings are those of 'adaptive',
+    // which the server uses until the media starts, and if it never does.
+    const highPerf = this._ardHpWanted();
+    if (highPerf) {
+        encs.push(encodingArdProMode);
+    }
+    const preset = this._ardQualityPreset === 'highperf' ? 'adaptive' : this._ardQualityPreset;
+
     // Data encodings per quality preset — order matters: server uses first supported
     const presetEncodings = {
         halftone:  [encodingArdHalftone, encodings.encodingZRLE, encodings.encodingZlib, encodings.encodingRaw],
@@ -418,7 +432,7 @@ RFB.prototype._sendEncodings = function () {
         millions:  [encodings.encodingZRLE, encodings.encodingZlib, encodings.encodingRaw],
         adaptive:  [encodingArdMVS, encodingArdThousands, encodings.encodingZRLE, encodings.encodingZlib, encodings.encodingRaw],
     };
-    const imageEncs = presetEncodings[this._ardQualityPreset] || presetEncodings.adaptive;
+    const imageEncs = presetEncodings[preset] || presetEncodings.adaptive;
     for (const enc of imageEncs) {
         encs.push(enc);
     }
@@ -445,7 +459,15 @@ RFB.prototype._sendEncodings = function () {
     encs.push(encodings.pseudoEncodingLastRect);
     encs.push(encodings.pseudoEncodingCursor);
 
+    if (highPerf) {
+        encs.push(pseudoEncodingArdMediaStream);
+    }
+
     RFB.messages.clientEncodings(this._sock, encs);
+
+    if (highPerf) {
+        this._ardHpStart();
+    }
 };
 
 // ===== (e) S→C message dispatch =====
@@ -1311,9 +1333,16 @@ Object.defineProperty(RFB.prototype, 'ardControlMode', {
 Object.defineProperty(RFB.prototype, 'ardQualityPreset', {
     get() { return this._ardQualityPreset; },
     set(preset) {
-        const valid = ['halftone', 'gray', 'thousands', 'millions', 'adaptive'];
+        const valid = ['halftone', 'gray', 'thousands', 'millions', 'adaptive', 'highperf'];
         if (!valid.includes(preset)) return;
         if (this._ardQualityPreset === preset) return;
+        // High Performance is negotiated when the connection is made;
+        // moving to or from it needs a new connection.
+        if ((preset === 'highperf' || this._ardHp) &&
+            this._rfbConnectionState === 'connected') {
+            Log.Warn("ARD: High Performance can only be chosen before connecting");
+            return;
+        }
         this._ardQualityPreset = preset;
         if (this._rfbConnectionState === 'connected' && this._rfbAppleARD) {
             this._ardQualitySwitch();
@@ -1443,10 +1472,105 @@ RFB.prototype._handleRect = function () {
 
             case pseudoEncodingArdKeyboardInput:  // 1109
                 return this._ardHandleKeyboardInput();
+
+            case pseudoEncodingArdMediaStream:  // 1110
+                return this._ardHandleMediaStreamRect('message1');
+
+            case encodingArdProMode:  // 1010, as a rectangle: the media answer
+                return this._ardHandleMediaStreamRect('answer');
         }
     }
     return _origHandleRect.call(this);
 };
+
+// ===== High Performance mode (ARD protocol spec, Section 14) =====
+//
+// The protocol lives in ard/hp/. Here: when to ask for it, the two
+// rectangles of its negotiation, and what to do when it fails.
+
+// High Performance is asked for when the preset says so, the page has
+// confirmed the browser can decode it and told us where the media channel
+// is, and it has not already failed on this connection.
+RFB.prototype._ardHpWanted = function () {
+    return this._ardQualityPreset === 'highperf' &&
+           !!this._ardHpAllowed && !!this._ardHpMediaUrl && !this._ardHpFailed;
+};
+
+RFB.prototype._ardHpStart = function () {
+    if (this._ardHp) return;
+    this._ardHp = new HpSession({
+        mediaUrl: this._ardHpMediaUrl,
+        feedback: this._ardHpFeedback,
+        endpoint: this._ardHpEndpoint,
+        sendOffer: bytes => RFB.messages.ardMediaStreamNegotiation(this._sock, bytes),
+        createSink: opts => new VideoSink(Object.assign({ target: this._canvas }, opts)),
+        onState: (state, reason) => this._ardHpOnState(state, reason),
+        log: msg => Log.Info("ARD HP: " + msg),
+    });
+    this._ardHp.start();
+};
+
+RFB.prototype._ardHpOnState = function (state, reason) {
+    const session = this._ardHp;
+    Log.Info("ARD HP: state " + state + (reason ? " (" + reason + ")" : ""));
+
+    if (state === 'failed') {
+        // Not again on this connection.
+        this._ardHpFailed = true;
+        this._ardHp = null;
+        // The server never opened the negotiation, so this is an ordinary
+        // session: carry on in it. Any later failure leaves the server in a
+        // state not yet understood; the page reconnects.
+        if (reason === 'no-message1' && this._rfbConnectionState === 'connected') {
+            this._ardQualitySwitch();
+        }
+    }
+
+    this.dispatchEvent(new CustomEvent("ardhpstate", {
+        detail: {
+            state,
+            reason: reason || null,
+            failure: session ? session.failure : null,
+            stats: session ? Object.assign({}, session.stats) : null,
+        }
+    }));
+    ardUpdateInfoPanel(this);
+};
+
+// Rectangles 1110 (Message 1) and 1010 (the answer): [u16be length][payload]
+RFB.prototype._ardHandleMediaStreamRect = function (which) {
+    if (this._sock.rQwait("MediaStream header", 2)) { return false; }
+    const head = this._sock.rQpeekBytes(2);
+    const length = (head[0] << 8) | head[1];
+    if (this._sock.rQwait("MediaStream body", 2 + length)) { return false; }
+
+    const payload = new Uint8Array(this._sock.rQshiftBytes(2 + length));
+    Log.Info("ARD HP: " + which + " received (" + length + " bytes)");
+
+    if (this._ardHp) {
+        if (which === 'message1') {
+            this._ardHp.handleMessage1(payload);
+        } else {
+            this._ardHp.handleAnswer(payload);
+        }
+    }
+    return true;
+};
+
+RFB.prototype._updateConnectionState = function (state) {
+    if ((state === 'disconnecting' || state === 'disconnected') && this._ardHp) {
+        const session = this._ardHp;
+        this._ardHp = null;
+        session.close();
+    }
+    return _origUpdateConnectionState.call(this, state);
+};
+
+// Whether High Performance media is on screen.
+Object.defineProperty(RFB.prototype, 'ardHighPerformanceActive', {
+    get() { return !!this._ardHp && this._ardHp.state === 'streaming'; },
+    configurable: true,
+});
 
 // ===== (h) SecurityResult — skip SecurityReason for ARD =====
 
@@ -2208,6 +2332,15 @@ RFB.messages.ardSetMode = function (sock, mode) {
 
 // SetDisplay (0x0d): [type(1)][u8 combineAll][pad(2)][u32be displayId] = 8 bytes
 // displayId null asks for all displays combined.
+// MediaStreamNegotiation (0x1c): SRTP keys and media offers, built by
+// ard/hp/negotiation.js. Sent in answer to rectangle 1110.
+RFB.messages.ardMediaStreamNegotiation = function (sock, bytes) {
+    sock.sQpushBytes(bytes);
+    sock.flush();
+
+    Log.Info("ARD: Sent MediaStreamNegotiation (" + bytes.length + " bytes)");
+};
+
 RFB.messages.ardSetDisplay = function (sock, displayId = null) {
     sock.sQpushBytes(setDisplayBytes(displayId));
     sock.flush();
@@ -2431,7 +2564,11 @@ function ardUpdateInfoPanel(rfb) {
     set('ard_info_encryption', rfb._ardEncryptionEnabled
         ? 'AES-128-CBC' : (rfb._ardAuthKey ? 'Keystroke only' : 'None'));
     const qualityLabels = { halftone: 'Halftone', gray: 'Gray16', thousands: 'Thousands', millions: 'Full Color', adaptive: 'Adaptive' };
-    set('ard_info_quality', qualityLabels[rfb._ardQualityPreset] || rfb._ardQualityPreset);
+    let quality = qualityLabels[rfb._ardQualityPreset] || rfb._ardQualityPreset;
+    if (rfb._ardQualityPreset === 'highperf') {
+        quality = rfb._ardHp ? 'High Performance (' + rfb._ardHp.state + ')' : 'Adaptive (High Performance unavailable)';
+    }
+    set('ard_info_quality', quality);
     const modeLabels = { 0: 'Observe', 1: 'Control', 2: 'Exclusive' };
     set('ard_info_mode', modeLabels[rfb._ardControlMode] || 'Control');
     const sessionLabels = { 0: 'Request Console', 1: 'Share Display', 2: 'Virtual Display' };

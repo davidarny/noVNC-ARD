@@ -52,7 +52,9 @@ open http://localhost:6088/ard.html
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `theme` | string | `novnc` | UI theme: `novnc`, `novnc-ard`, `noard` |
-| `ardQuality` | string | `adaptive` | Initial quality preset: `halftone`, `gray`, `thousands`, `millions`, `adaptive` |
+| `ardQuality` | string | `adaptive` | Initial quality preset: `halftone`, `gray`, `thousands`, `millions`, `adaptive`, `highperf` (experimental, see [High Performance Mode](#high-performance-mode-experimental)) |
+| `ardMediaPath` | string | `media` | Path of the relay's media WebSocket, used by `highperf` |
+| `ardHpFeedback` | string | all | Which RTCP the viewer sends in `highperf`: a comma list of `rr`, `ack`, `rctl`. For protocol testing |
 | `ardEncryption` | integer | `2` | Encryption mode: `1` = keystroke-only, `2` = full tunnel |
 | `ardControlMode` | integer | `1` | Control mode: `0` = observe, `1` = shared, `2` = exclusive |
 | `virtualLogin` | integer | `1` | Session select: `0` = always share, `1` = show picker, `2` = always virtual |
@@ -95,6 +97,7 @@ open http://localhost:6088/ard.html
 | `arddisplayinfo` | `{ width, height, displays }` | Display list received or changed. Each display has `id`, `main`, `w`, `h` |
 | `ardcurtainchange` | `{ active }` | Curtain lock state changed |
 | `ardencryptionstate` | `{ state }` | Session encryption activated |
+| `ardhpstate` | `{ state, reason, failure, stats }` | High Performance session changed state: `offering`, `waiting`, `streaming`, `failed`, `closed` |
 
 ## Versioning
 
@@ -111,6 +114,33 @@ Versions look like `1.0.0+1.6.0`: the noVNC-ARD version, then the version of the
 | `adaptive` (default) | ArdMVS, ArdThousands, ZRLE, Zlib, Raw | 24-bit, lossy (DCT) |
 
 All presets include standard fallback encodings (CopyRect, Hextile, RRE) and ARD pseudo-encodings (CursorPos, DisplayInfo, UserInfo, SessionEncryption, CursorAlpha, DisplayInfo2, DeviceInfo, KeyboardInput).
+
+`highperf` sends the `adaptive` list with ProMode (1010) first and MediaStream (1110) last.
+
+## High Performance Mode (experimental)
+
+macOS 14 and later can send the screen as HEVC video over UDP instead of framebuffer updates: Screen Sharing's "High Performance" connection type. `?ardQuality=highperf` asks for it.
+
+**Status: not yet tested against a live server.** The receive path is verified against captured sessions; whether a server accepts this viewer's offer is unknown. Video only; audio is negotiated and discarded.
+
+The server sends the media as UDP to the address of its TCP peer, which a browser cannot receive, so websockify is not enough. Use the relay in `relay/`, which bridges TCP like websockify and also carries the UDP over a second WebSocket:
+
+```bash
+# Run on a machine other than the Mac being viewed; needs UDP 5900 and 5901 free
+node relay/relay.mjs --listen 6088 --target <host>
+
+open "http://localhost:6088/ard.html?ardQuality=highperf"
+```
+
+Requirements:
+
+- A browser that decodes HEVC 4:4:4 through WebCodecs. Chrome, Edge and Safari on Apple silicon do; Firefox does not. Otherwise the page connects as `adaptive`.
+- The relay must be reachable from the Mac on UDP 5900 and 5901, and those ports must be free on the relay's machine.
+- One High Performance session per relay.
+
+The mode is chosen when the connection is made. If it cannot start, the page logs the reason and reconnects as `adaptive`. The picture is drawn at the display's pixel resolution on a canvas laid over noVNC's own, which keeps handling input and the cursor.
+
+The protocol code is in `ard/hp/`: negotiation (`negotiation.js`, `offer-template.js`, `plist.js`, `protobuf.js`, `zlib.js`), SRTP (`srtp.js`), picture reassembly (`rtp-video.js`), RTCP feedback (`feedback.js`), decoding and painting (`video-sink.js`, `hevc.js`) and the session that ties them together (`session.js`).
 
 ## Project Structure
 
@@ -167,7 +197,11 @@ node --test ard/tests/test.crypto.js         # crypto primitives
 node --test ard/tests/test.wire.js           # wire format + message builders
 node --test ard/tests/test.mvs.js            # MVS decoder
 node --test ard/tests/test.display-info.js   # display list + selection
+node --test ard/tests/test.hp-*.js           # High Performance mode
+node --test relay/test.relay.js              # relay
 ```
+
+`test.hp-replay.js` runs a captured High Performance session through the receive path. Captures hold screen contents and session keys, so none is included; the test is skipped unless `HP_REPLAY_FIXTURE` names a fixture file.
 
 Crypto tests validate against FIPS 197 and NIST test vectors. Wire tests cover ARD message byte patterns, session select event dispatch, and state machine transitions.
 

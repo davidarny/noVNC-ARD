@@ -42,6 +42,7 @@
         import * as Log from './noVNC/core/util/logging.js';
         import { encodingArdHalftone, encodingArdGray16, encodingArdThousands } from './ard/ard-constants.js';
         import { displayMenuEntries } from './ard/display-info.js';
+        import { VideoSink } from './ard/hp/video-sink.js';
 
         let response;
 
@@ -174,10 +175,41 @@
         const ardVirtualLogin = (virtualLoginParam === 0 || virtualLoginParam === 2)
             ? virtualLoginParam : 1;
 
-        // ardQuality: halftone, gray, thousands, millions, adaptive (default)
+        // ardQuality: halftone, gray, thousands, millions, adaptive (default),
+        // highperf (High Performance: HEVC over a media channel on the relay)
         const ardQualityParam = getParamCI('ardQuality');
-        const ardInitialQuality = ['halftone', 'gray', 'thousands', 'millions', 'adaptive'].includes(ardQualityParam)
+        const ardInitialQuality = ['halftone', 'gray', 'thousands', 'millions', 'adaptive', 'highperf'].includes(ardQualityParam)
             ? ardQualityParam : 'adaptive';
+
+        // High Performance needs a browser that decodes the server's HEVC
+        // and a relay with a media endpoint. When it fails, the next
+        // connection is an ordinary 'adaptive' one.
+        const ardMediaPath = (getParamCI('ardMediaPath') || 'media').replace(/^\/+/, '');
+        // ardHpFeedback: which RTCP the viewer sends, for testing what the
+        // server needs. Comma list of rr, ack, rctl; default all.
+        const ardHpFeedbackParam = getParamCI('ardHpFeedback');
+        const ardHpFeedback = ardHpFeedbackParam === null || ardHpFeedbackParam === undefined ? undefined : {
+            reports: ardHpFeedbackParam.split(',').includes('rr'),
+            acks: ardHpFeedbackParam.split(',').includes('ack'),
+            rateControl: ardHpFeedbackParam.split(',').includes('rctl'),
+        };
+        let ardHpSupported = false;
+        let ardHpDisabled = false;
+        const ardHpSupportCheck = ardInitialQuality === 'highperf'
+            ? VideoSink.isSupported().then((ok) => {
+                ardHpSupported = ok;
+                if (!ok) Log.Warn('ARD: this browser cannot decode High Performance video; using adaptive');
+                if (UI.rfb) UI.rfb._ardHpAllowed = ok && !ardHpDisabled;
+            })
+            : Promise.resolve();
+
+        function ardHpMediaUrl() {
+            if (UI.getSetting('path') === 'msgport') return null;   // no media channel there yet
+            const host = UI.getSetting('host') || window.location.hostname;
+            const port = UI.getSetting('port') || window.location.port;
+            const scheme = UI.getSetting('encrypt') ? 'wss' : 'ws';
+            return scheme + '://' + host + (port ? ':' + port : '') + '/' + ardMediaPath;
+        }
 
         // ardControlMode: 0=observe, 1=shared control (default), 2=exclusive
         const ardControlModeParam = parseInt(getParamCI('ardControlMode'), 10);
@@ -725,6 +757,26 @@
                 UI.rfb._ardVirtualLogin = ardVirtualLogin;
                 UI.rfb._ardQualityPreset = ardInitialQuality;
                 UI.rfb._ardControlMode = ardInitialControlMode;
+                if (ardInitialQuality === 'highperf') {
+                    UI.rfb._ardHpAllowed = ardHpSupported && !ardHpDisabled;
+                    UI.rfb._ardHpMediaUrl = ardHpMediaUrl();
+                    UI.rfb._ardHpFeedback = ardHpFeedback;
+                    UI.rfb.addEventListener('ardhpstate', (e) => {
+                        const d = e.detail;
+                        if (d.state === 'streaming') {
+                            Log.Info('ARD: High Performance video on screen');
+                        } else if (d.state === 'failed') {
+                            Log.Warn('ARD: High Performance failed (' + d.failure + '); falling back to adaptive');
+                            ardHpDisabled = true;
+                            // The server never started the negotiation: the
+                            // session is an ordinary one and carries on.
+                            // Otherwise start again without it.
+                            if (d.reason !== 'no-message1' && UI.rfb) {
+                                UI.rfb.disconnect();
+                            }
+                        }
+                    });
+                }
                 // Without the selector there would be no way back to
                 // the other displays, so stay on all of them
                 UI.rfb._ardAutoSelectDisplay = ardAutoSelectDisplay && showArdDisplaySelect;
