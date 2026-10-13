@@ -12,7 +12,9 @@ set -euo pipefail
 VERSION=6.10.9
 FFMPEG_VERSION=9.0
 VARIANT=ard-aac
-IMAGE=emscripten/emsdk:latest
+# The toolchain that built the decoder in the repository (Emscripten 6.0.9),
+# by digest so that the same script gives the same build later on.
+IMAGE=emscripten/emsdk:6.0.9@sha256:96617f27fe16421588241def73908fd348a7f9d260440ed0d00b36dcf7a063cc
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="${1:-${TMPDIR:-/tmp}/libav-build-ard}"
