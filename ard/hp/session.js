@@ -25,6 +25,7 @@ export const CHANNEL_VIDEO = 1;
 
 const MEDIA_CONNECT_MS = 3000;
 const MESSAGE1_MS = 5000;
+const ENCRYPTION_MS = 5000;
 const ANSWER_MS = 5000;
 const FIRST_FRAME_MS = 5000;
 const REPORT_MS = 1000;
@@ -58,6 +59,8 @@ export class HpSession {
     /*
      * mediaUrl:        WebSocket URL of the relay's media endpoint
      * sendOffer(bytes): send the 0x1c message on the RFB connection
+     * holdOffer:       true if the RFB connection is still to be encrypted. The offer
+     *                  carries the media keys, so it waits for releaseOffer().
      * createSink({ width, height, stripes, onFirstFrame, onError }): → { push(picture), close() }
      * createAudio():   optional; resolves to { push(rtp), close() } that plays the sound.
      *                  Without it, or if it fails, audio packets are counted and dropped.
@@ -65,10 +68,11 @@ export class HpSession {
      * feedback:        { reports, acks, rateControl } — which RTCP to send
      * endpoint:        how the viewer describes itself in the offer
      */
-    constructor({ mediaUrl, sendOffer, createSink, createAudio, audioMuted, onState, feedback,
-                  endpoint, WebSocketImpl, now, log }) {
+    constructor({ mediaUrl, sendOffer, holdOffer, createSink, createAudio, audioMuted, onState,
+                  feedback, endpoint, WebSocketImpl, now, log }) {
         this._mediaUrl = mediaUrl;
         this._sendOffer = sendOffer;
+        this._offerHeld = !!holdOffer;
         this._createSink = createSink;
         this._createAudio = createAudio;
         this._audio = null;
@@ -230,13 +234,27 @@ export class HpSession {
             return;
         }
         this._log('server offers High Performance (' + this._message1.model + ')');
+        if (this._offerHeld) {
+            this._timeout(ENCRYPTION_MS, () => {
+                if (this._offerHeld) this._fail('no-encryption');
+            });
+        }
+        this._maybeOffer();
+    }
+
+    // The RFB connection is encrypted now: the offer may be sent on it.
+    releaseOffer() {
+        if (!this._offerHeld) return;
+        this._offerHeld = false;
         this._maybeOffer();
     }
 
     // The offer goes out once the server has asked and the media channel is
-    // up: the server starts sending as soon as it has answered.
+    // up: the server starts sending as soon as it has answered. It holds
+    // the keys of the media, so it also waits for a connection that is
+    // about to be encrypted.
     _maybeOffer() {
-        if (this.state !== 'idle' || !this._message1 || !this._wsOpen) return;
+        if (this.state !== 'idle' || !this._message1 || !this._wsOpen || this._offerHeld) return;
         this._setState('offering');
         this._secrets = generateSecrets();
         buildOffer(this._secrets, { endpoint: this._endpoint }).then((offer) => {

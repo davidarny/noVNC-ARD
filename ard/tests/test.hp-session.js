@@ -229,6 +229,39 @@ describe('High Performance session', () => {
         await until(() => offers.length === 1, 'the offer');
     });
 
+    it('holds the offer until the connection is encrypted', async () => {
+        create({ holdOffer: true });
+        ws.open();
+        session.handleMessage1(message1());
+        await settle();
+        strictEqual(offers.length, 0);
+        strictEqual(session.state, 'idle');
+        session.releaseOffer();
+        await until(() => offers.length === 1, 'the offer');
+        strictEqual(session.state, 'offering');
+
+        // Released before the server asks: nothing is sent early.
+        create({ holdOffer: true });
+        ws.open();
+        session.releaseOffer();
+        await settle();
+        strictEqual(offers.length, 0);
+        session.handleMessage1(message1());
+        await until(() => offers.length === 1, 'the offer');
+    });
+
+    it('fails, sending no offer, when the connection is never encrypted', async () => {
+        create({ holdOffer: true });
+        ws.open();
+        session.handleMessage1(message1());
+        await settle();
+        mock.timers.tick(5000);
+        deepStrictEqual(states, ['failed:no-encryption']);
+        session.releaseOffer();
+        await settle();
+        strictEqual(offers.length, 0);
+    });
+
     it('sends one offer however often Message 1 arrives', async () => {
         create();
         ws.open();

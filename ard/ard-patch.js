@@ -1562,10 +1562,25 @@ RFB.prototype._ardHpRequestVirtualDisplay = function () {
     RFB.messages.ardVirtualDisplay(this._sock, buildVirtualDisplayMessage());
 };
 
+// Full encryption has been asked for and has not started yet. Until it
+// has, nothing that must stay secret may be sent.
+RFB.prototype._ardEncryptionAwaited = function () {
+    return !!this._ardAuthKey && this._ardEncryptionMode === 2 && !this._ardEncryptionEnabled;
+};
+
 RFB.prototype._ardHpStart = function () {
     if (this._ardHp) return;
+    // The offer carries the keys that protect the picture and the sound.
+    // The server may open the negotiation before the connection is
+    // encrypted, so the offer waits for that. Where encryption covers
+    // keystrokes only, the keys travel as openly as the rest of the session.
+    const holdOffer = this._ardEncryptionAwaited();
+    if (!holdOffer && !this._ardEncryptionEnabled) {
+        Log.Warn("ARD HP: this connection is not encrypted, so the media keys are not either");
+    }
     this._ardHp = new HpSession({
         mediaUrl: this._ardHpMediaUrl,
+        holdOffer,
         feedback: this._ardHpFeedback,
         endpoint: this._ardHpEndpoint,
         sendOffer: bytes => RFB.messages.ardMediaStreamNegotiation(this._sock, bytes),
@@ -2151,6 +2166,7 @@ RFB.prototype._enableStreamEncryption = function (sessionKey, sessionIV) {
     this._ardSessionKey = sessionKey;
     this._ardSessionIV = sessionIV;
     Log.Info("ARD: Stream encryption enabled (AES-128-CBC)");
+    if (this._ardHp) this._ardHp.releaseOffer();
 
     ardUpdateInfoPanel(this);
 
