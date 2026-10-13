@@ -1583,7 +1583,8 @@ RFB.prototype._ardHpRequestVirtualDisplay = function () {
     if (display) {
         const m = display.modes[0];
         Log.Info("ARD: asking for a virtual display of " + m.width + "x" + m.height +
-                 " points, " + m.pixelWidth + "x" + m.pixelHeight + " pixels" +
+                 " points, " + m.pixelWidth + "x" + m.pixelHeight + " pixels, room for " +
+                 display.largest.pixelWidth + "x" + display.largest.pixelHeight +
                  (sizedStandard ? " (Standard quality, experimental)" : ""));
     }
     RFB.messages.ardVirtualDisplay(this._sock, buildVirtualDisplayMessage(display ? [display] : undefined));

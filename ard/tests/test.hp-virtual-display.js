@@ -76,13 +76,29 @@ describe('Virtual display of a chosen size', () => {
                         DEFAULT_VIRTUAL_DISPLAY.modes[0]);
     });
 
-    it('keeps the picture within 3840x2160, in the same shape', () => {
+    it('keeps the picture within the pixels of 3840x2160, in the same shape', () => {
         const m = mode(virtualDisplayFor({ width: 2560, height: 1440, scale: 2 }));
         deepStrictEqual([m.pixelWidth, m.pixelHeight, m.width, m.height], [3840, 2160, 1920, 1080]);
-        const tall = mode(virtualDisplayFor({ width: 1200, height: 1600, scale: 2 }));
-        deepStrictEqual([tall.pixelWidth, tall.pixelHeight, tall.width, tall.height], [1620, 2160, 810, 1080]);
         const big = mode(virtualDisplayFor({ width: 5120, height: 2880, scale: 1 }));
         deepStrictEqual([big.pixelWidth, big.pixelHeight], [3840, 2160]);
+    });
+
+    // The limit is the number of pixels, not a width and a height
+    it('lets a shape that is not 16 to 9 be wider than 3840 or taller than 2160', () => {
+        const tall = mode(virtualDisplayFor({ width: 1200, height: 1600, scale: 2 }));
+        deepStrictEqual([tall.pixelWidth, tall.pixelHeight, tall.width, tall.height], [2400, 3200, 1200, 1600]);
+        const wide = mode(virtualDisplayFor({ width: 1950, height: 480, scale: 2 }));
+        deepStrictEqual([wide.pixelWidth, wide.pixelHeight, wide.width, wide.height], [3900, 960, 1950, 480]);
+        // and makes room for it in the display
+        deepStrictEqual(virtualDisplayFor({ width: 1950, height: 480, scale: 2 }).largest,
+                        { pixelWidth: 3900, pixelHeight: 2160 });
+        deepStrictEqual(virtualDisplayFor({ width: 1200, height: 1600, scale: 2 }).largest,
+                        { pixelWidth: 3840, pixelHeight: 3200 });
+    });
+
+    it('never makes a side longer than 7680 pixels', () => {
+        const strip = mode(virtualDisplayFor({ width: 5000, height: 480, scale: 2 }));
+        deepStrictEqual([strip.pixelWidth, strip.width], [7680, 3840]);
     });
 
     it('makes every dimension even and nothing smaller than 640x480', () => {
@@ -90,6 +106,21 @@ describe('Virtual display of a chosen size', () => {
         deepStrictEqual([odd.width, odd.height, odd.pixelWidth, odd.pixelHeight], [1366, 768, 1366, 768]);
         const small = mode(virtualDisplayFor({ width: 320, height: 240, scale: 2 }));
         deepStrictEqual([small.width, small.height, small.pixelWidth, small.pixelHeight], [640, 480, 1280, 960]);
+    });
+
+    // A window 1950 points wide and 480 high at 2 was sent as 3840 pixels for
+    // 1950 points: the server made a display of 1600x1200 instead.
+    it('always sends pixels that are the points times the scale', () => {
+        for (const scale of [1, 2]) {
+            for (const [width, height] of [[1950, 480], [1976, 490], [3000, 300], [300, 3000], [641, 479],
+                                           [5000, 400], [400, 5000], [1921, 1081], [974, 784]]) {
+                const m = mode(virtualDisplayFor({ width, height, scale }));
+                deepStrictEqual([m.pixelWidth, m.pixelHeight], [m.width * scale, m.height * scale],
+                                `${width}x${height}@${scale}`);
+                strictEqual(m.pixelWidth * m.pixelHeight <= 3840 * 2160 &&
+                            m.pixelWidth <= 7680 && m.pixelHeight <= 7680, true, `${width}x${height}@${scale}`);
+            }
+        }
     });
 
     it('refuses a size that is not one', () => {
