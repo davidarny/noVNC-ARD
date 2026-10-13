@@ -16,6 +16,7 @@ import { parseMessage1, generateSecrets, buildOffer, parseAnswer, splitKeyBlock 
 import { createContext } from './srtp.js';
 import { VideoAssembler } from './rtp-video.js';
 import { receiverReport, pictureAck, rateControl } from './feedback.js';
+import { extendSeq } from './seq.js';
 
 // WebSocket subprotocol a relay's media endpoint answers to.
 export const MEDIA_SUBPROTOCOL = 'ard-media';
@@ -47,11 +48,7 @@ class SeqTracker {
             this.highest = seq;
             return;
         }
-        const low = this.highest & 0xffff;
-        let delta = seq - low;
-        if (delta > 0x8000) delta -= 0x10000;
-        else if (delta < -0x8000) delta += 0x10000;
-        if (delta > 0) this.highest += delta;
+        this.highest = Math.max(this.highest, extendSeq(this.highest, seq));
     }
 }
 

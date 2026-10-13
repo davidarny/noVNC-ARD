@@ -7,6 +7,11 @@
  * decoder needs them in sequence, and needs to know when one is missing.
  */
 
+import { extendSeq } from './seq.js';
+
+// The stream: AAC-ELD, stereo, 48 kHz, 480 samples (10 ms) a frame.
+export const AUDIO_SAMPLE_RATE = 48000;
+export const AUDIO_CHANNELS = 2;
 export const AUDIO_FRAME_SAMPLES = 480;
 
 export class AudioReorder {
@@ -25,19 +30,9 @@ export class AudioReorder {
         this.stats = { packets: 0, late: 0, duplicates: 0, lost: 0 };
     }
 
-    // Extend a 16-bit sequence number past its wrap.
-    _extend(seq) {
-        if (this._highest === null) return seq;
-        const low = this._highest & 0xffff;
-        let delta = seq - low;
-        if (delta > 0x8000) delta -= 0x10000;
-        else if (delta < -0x8000) delta += 0x10000;
-        return this._highest + delta;
-    }
-
     push({ seq, timestamp, payload }) {
         this.stats.packets++;
-        const ext = this._extend(seq);
+        const ext = this._highest === null ? seq : extendSeq(this._highest, seq);
         if (this._highest === null || ext > this._highest) this._highest = ext;
         if (this._next === null) this._next = ext;
 

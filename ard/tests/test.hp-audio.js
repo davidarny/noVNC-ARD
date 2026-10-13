@@ -9,10 +9,10 @@
 import { describe, it } from 'node:test';
 import { deepStrictEqual, strictEqual, ok } from 'node:assert';
 
-import { AudioReorder } from '../hp/rtp-audio.js';
+import { AudioReorder, AUDIO_FRAME_SAMPLES } from '../hp/rtp-audio.js';
 import { PcmRing } from '../hp/pcm-ring.js';
 import { AudioPipeline } from '../hp/audio.js';
-import { AacEldDecoder, FRAME_SAMPLES } from '../hp/audio-decoder.js';
+import { AacEldDecoder } from '../hp/audio-decoder.js';
 
 function packet(seq) {
     return { seq: seq & 0xffff, timestamp: seq * 480, payload: new Uint8Array([seq & 0xff]) };
@@ -213,8 +213,8 @@ describe('AAC-ELD decoder (WebAssembly)', () => {
         strictEqual(pcm.length, 10);
         for (const { left, right } of pcm) {
             ok(left instanceof Float32Array && right instanceof Float32Array);
-            strictEqual(left.length, FRAME_SAMPLES);
-            strictEqual(right.length, FRAME_SAMPLES);
+            strictEqual(left.length, AUDIO_FRAME_SAMPLES);
+            strictEqual(right.length, AUDIO_FRAME_SAMPLES);
             ok(left.every(v => v === 0) && right.every(v => v === 0));
         }
         strictEqual(decoder.stats.frames, 10);

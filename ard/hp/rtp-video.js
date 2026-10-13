@@ -15,6 +15,8 @@
  * Payloads are kept by reference until their picture is emitted or dropped.
  */
 
+import { seqDelta, extendSeq } from './seq.js';
+
 const MAX_BUFFERED = 512;       // pictures collecting or waiting; more means the stream is lost
 
 const TYPE_AGGREGATION = 48;
@@ -69,7 +71,7 @@ function inSequenceOrder(parts) {
     let first = null;
     for (const [seq, part] of parts) {
         if (first === null) first = seq;
-        entries.push([((seq - first + 0x8000) & 0xffff) - 0x8000, part]);
+        entries.push([seqDelta(seq, first), part]);
     }
     entries.sort((a, b) => a[0] - b[0]);
     return entries.map(entry => entry[1]);
@@ -235,8 +237,7 @@ export class VideoAssembler {
     _unwrap(don16) {
         if (this._ref === null) this._ref = don16;
         const ref = this._next === null ? this._ref : this._next;
-        const delta = ((don16 - ref) % 0x10000 + 0x18000) % 0x10000 - 0x8000;
-        return ref + delta;
+        return extendSeq(ref, don16);
     }
 
     // Emission begins at the first complete key picture

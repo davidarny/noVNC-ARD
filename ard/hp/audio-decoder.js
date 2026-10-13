@@ -10,10 +10,7 @@
  */
 
 import LibAVFactory from './vendor/libav/libav-6.10.9.0-ard-aac.mjs';
-
-export const SAMPLE_RATE = 48000;
-export const CHANNELS = 2;
-export const FRAME_SAMPLES = 480;
+import { AUDIO_SAMPLE_RATE, AUDIO_CHANNELS, AUDIO_FRAME_SAMPLES } from './rtp-audio.js';
 
 // AAC-ELD, 48 kHz, stereo, 480 samples per frame, no SBR.
 export const AUDIO_SPECIFIC_CONFIG = new Uint8Array([0xf8, 0xe6, 0x50, 0x00]);
@@ -31,11 +28,11 @@ export class AacEldDecoder {
                 codec_type: libav.AVMEDIA_TYPE_AUDIO,
                 codec_id: AV_CODEC_ID_AAC,
                 format: libav.AV_SAMPLE_FMT_FLTP,
-                sample_rate: SAMPLE_RATE,
-                channels: CHANNELS,
+                sample_rate: AUDIO_SAMPLE_RATE,
+                channels: AUDIO_CHANNELS,
                 extradata: AUDIO_SPECIFIC_CONFIG,
             },
-            time_base: [1, SAMPLE_RATE],
+            time_base: [1, AUDIO_SAMPLE_RATE],
         });
         return new AacEldDecoder(libav, context, packet, frame);
     }
@@ -58,7 +55,7 @@ export class AacEldDecoder {
         if (!this._libav) return [];
         const packets = units.map((data) => {
             const pts = this._pts;
-            this._pts += FRAME_SAMPLES;
+            this._pts += AUDIO_FRAME_SAMPLES;
             return { data, pts, dts: pts };
         });
         let frames;

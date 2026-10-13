@@ -386,11 +386,12 @@ RFB.prototype._negotiateServerInit = function () {
     return this._ardNormalInit(width, height);
 };
 
-// Normal (non-session-select) path — matches ARD init order:
-// ViewerInfo → SetMode → SetDisplay → AutoPasteboard
-// → SetEncodings → PixelFormat → SetEncodings
-// → SetEncryption → FBUpdateRequest
-RFB.prototype._ardNormalInit = function (width, height) {
+// What is asked of the server once the session is open, in ARD's order:
+// ViewerInfo → SetMode → VirtualDisplay (High Performance) → SetDisplay
+// → AutoPasteboard → SetEncodings → PixelFormat → SetEncodings
+// → SetEncryption. The first framebuffer update request follows, when the
+// size of the screen is known.
+RFB.prototype._ardSendSessionSetup = function () {
     RFB.messages.ardViewerInfo(this._sock);
     RFB.messages.ardSetMode(this._sock, this._ardControlMode || 1);
     this._ardHpRequestVirtualDisplay();
@@ -407,6 +408,11 @@ RFB.prototype._ardNormalInit = function (width, height) {
     } else if (this._ardAuthKey) {
         Log.Info("ARD: Keystroke-only encryption mode — skipping tunnel encryption");
     }
+};
+
+// Normal (non-session-select) path
+RFB.prototype._ardNormalInit = function (width, height) {
+    this._ardSendSessionSetup();
 
     // CRITICAL: Never send FBUpdateRequest with 0x0 dimensions —
     // causes the macOS Screen Sharing server to hang in zlib deflate infinite loop
@@ -924,21 +930,7 @@ RFB.prototype._ardPostSessionInit = function () {
     }
     Log.Info("ARD: Session granted — sending protocol setup");
 
-    // Same init order as normal path
-    RFB.messages.ardViewerInfo(this._sock);
-    RFB.messages.ardSetMode(this._sock, this._ardControlMode || 1);
-    this._ardHpRequestVirtualDisplay();
-    RFB.messages.ardSetDisplay(this._sock, this._ardSelectedDisplay);
-    RFB.messages.ardAutoPasteboard(this._sock, 1);
-    this._sendEncodings();
-    RFB.messages.pixelFormat(this._sock, this._fbDepth, true);
-    this._sendEncodings();
-
-    // Request session encryption before FBUpdateRequest
-    if (this._ardAuthKey && this._ardEncryptionMode === 2) {
-        RFB.messages.ardSetEncryption(this._sock, 1);
-        Log.Info("ARD: Sent SetEncryption request (cmd=1)");
-    }
+    this._ardSendSessionSetup();
 
     // Defer FBUpdateRequest — dimensions are still 0x0, will send when valid
     this._ardDeferredFBURequest = true;

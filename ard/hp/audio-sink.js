@@ -7,7 +7,7 @@
  * click or key press if need be.
  */
 
-export const SAMPLE_RATE = 48000;
+import { AUDIO_SAMPLE_RATE } from './rtp-audio.js';
 
 export class AudioSink {
     static isSupported() {
@@ -15,7 +15,7 @@ export class AudioSink {
     }
 
     static async create() {
-        const context = new AudioContext({ sampleRate: SAMPLE_RATE, latencyHint: 'interactive' });
+        const context = new AudioContext({ sampleRate: AUDIO_SAMPLE_RATE, latencyHint: 'interactive' });
         try {
             await context.audioWorklet.addModule(new URL('./pcm-worklet.js', import.meta.url));
         } catch (e) {
