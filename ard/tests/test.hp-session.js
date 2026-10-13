@@ -830,6 +830,17 @@ describe('High Performance session', () => {
         await until(() => offers.length === 3, 'the third offer');
     });
 
+    it('does not call the media silent during a resize switch', async () => {
+        await stream();
+        session.reoffer();
+        await until(() => offers.length === 2, 'the second offer');
+        // The server has stopped its media to switch size; no packets for
+        // longer than the silence window, but a re-offer is in flight.
+        mock.timers.tick(4000);
+        strictEqual(session.state, 'streaming');
+        strictEqual(session.reoffering(), true);
+    });
+
     it('does not re-offer unless it is streaming', async () => {
         await negotiate();          // 'waiting', not yet streaming
         session.reoffer();

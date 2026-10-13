@@ -331,6 +331,7 @@ export class HpSession {
     reoffer() {
         if (this.state !== 'streaming' || this._reoffering) return;
         this._reoffering = true;
+        this._lastMediaAt = this._now();   // the switch gap is not silence
         if (!this._resizeSignalled) { this._resizeSignalled = true; this._onResize(true); }
         this._pendingSecrets = generateSecrets();
         buildOffer(this._pendingSecrets, { endpoint: this._endpoint }).then((offer) => {
@@ -593,7 +594,10 @@ export class HpSession {
         const now = this._now();
         if (this._assembler) this._assembler.tick(now);
         this._checkLoad(now);
-        if (this.state === 'streaming' && this._lastMediaAt !== null &&
+        // A re-offer (resize) makes the server stop its media, reconfigure
+        // the display and start again; that gap is not the server going
+        // away, so the silence watchdog pauses until the new stream is in.
+        if (this.state === 'streaming' && !this._reoffering && this._lastMediaAt !== null &&
             now - this._lastMediaAt > MEDIA_SILENCE_MS) {
             this._fail('media-stopped');
         }
