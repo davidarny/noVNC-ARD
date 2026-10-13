@@ -36,6 +36,7 @@ import { parseDisplayInfo2, setDisplayBytes, displayRole,
          reconcileSelection } from './display-info.js';
 import { HpSession } from './hp/session.js';
 import { VideoSink } from './hp/video-sink.js';
+import { buildVirtualDisplayMessage } from './hp/virtual-display.js';
 
 import {
     encodingArdHalftone,
@@ -378,6 +379,7 @@ RFB.prototype._negotiateServerInit = function () {
     // → SetEncryption → FBUpdateRequest
     RFB.messages.ardViewerInfo(this._sock);
     RFB.messages.ardSetMode(this._sock, this._ardControlMode || 1);
+    this._ardHpRequestVirtualDisplay();
     RFB.messages.ardSetDisplay(this._sock, this._ardSelectedDisplay);
     RFB.messages.ardAutoPasteboard(this._sock, 1);
     this._sendEncodings();
@@ -870,6 +872,7 @@ RFB.prototype._ardPostSessionInit = function () {
     // Same init order as normal path
     RFB.messages.ardViewerInfo(this._sock);
     RFB.messages.ardSetMode(this._sock, this._ardControlMode || 1);
+    this._ardHpRequestVirtualDisplay();
     RFB.messages.ardSetDisplay(this._sock, this._ardSelectedDisplay);
     RFB.messages.ardAutoPasteboard(this._sock, 1);
     this._sendEncodings();
@@ -1496,6 +1499,15 @@ RFB.prototype._ardHpWanted = function () {
            !!this._ardHpAllowed && !!this._ardHpMediaUrl && !this._ardHpFailed;
 };
 
+// High Performance normally runs on a virtual display the server creates
+// for the viewer, at the viewer's pixel density. The request has to reach
+// the server before SetEncodings. Without it the server sends its real
+// displays instead.
+RFB.prototype._ardHpRequestVirtualDisplay = function () {
+    if (!this._ardHpWanted() || this._ardHpVirtualDisplay === false) return;
+    RFB.messages.ardVirtualDisplay(this._sock, buildVirtualDisplayMessage());
+};
+
 RFB.prototype._ardHpStart = function () {
     if (this._ardHp) return;
     this._ardHp = new HpSession({
@@ -1513,6 +1525,12 @@ RFB.prototype._ardHpStart = function () {
 RFB.prototype._ardHpOnState = function (state, reason) {
     const session = this._ardHp;
     Log.Info("ARD HP: state " + state + (reason ? " (" + reason + ")" : ""));
+
+    // Once the server has answered, the picture comes as media. Apple's
+    // viewer then asks for no more framebuffer updates, not even in reply
+    // to the server's keep-alive; servers have been seen to drop a session
+    // that keeps asking.
+    this._sock._ardHpQuiet = state === 'waiting' || state === 'streaming';
 
     if (state === 'failed') {
         // Not again on this connection.
@@ -1555,6 +1573,15 @@ RFB.prototype._ardHandleMediaStreamRect = function (which) {
         }
     }
     return true;
+};
+
+// Framebuffer update requests are dropped while High Performance media is
+// the picture. Both builders are called from many places, noVNC's own
+// update loop among them, so the check sits here.
+const _origFbUpdateRequest = RFB.messages.fbUpdateRequest;
+RFB.messages.fbUpdateRequest = function (sock, ...args) {
+    if (sock._ardHpQuiet) return;
+    return _origFbUpdateRequest.call(RFB.messages, sock, ...args);
 };
 
 RFB.prototype._updateConnectionState = function (state) {
@@ -2341,6 +2368,15 @@ RFB.messages.ardMediaStreamNegotiation = function (sock, bytes) {
     Log.Info("ARD: Sent MediaStreamNegotiation (" + bytes.length + " bytes)");
 };
 
+// VirtualDisplay (0x1d): asks the server to create the display High
+// Performance mode is shown on. Built by ard/hp/virtual-display.js.
+RFB.messages.ardVirtualDisplay = function (sock, bytes) {
+    sock.sQpushBytes(bytes);
+    sock.flush();
+
+    Log.Info("ARD: Sent VirtualDisplay request (" + bytes.length + " bytes)");
+};
+
 RFB.messages.ardSetDisplay = function (sock, displayId = null) {
     sock.sQpushBytes(setDisplayBytes(displayId));
     sock.flush();
@@ -2354,6 +2390,7 @@ RFB.messages.ardSetDisplay = function (sock, displayId = null) {
 // Tells the server to automatically push framebuffer updates
 // without waiting for explicit FBUpdateRequests.
 RFB.messages.ardAutoFBUpdate = function (sock, enabled, x, y, w, h) {
+    if (sock._ardHpQuiet) return;   // High Performance media is the picture
     sock.sQpush8(msgTypeAutoFBUpdate);  // 0x09
     sock.sQpush8(0);                    // padding
     sock.sQpush16(enabled);             // 1=enable, 0=disable

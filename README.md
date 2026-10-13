@@ -54,6 +54,7 @@ open http://localhost:6088/ard.html
 | `theme` | string | `novnc` | UI theme: `novnc`, `novnc-ard`, `noard` |
 | `ardQuality` | string | `adaptive` | Initial quality preset: `halftone`, `gray`, `thousands`, `millions`, `adaptive`, `highperf` (experimental, see [High Performance Mode](#high-performance-mode-experimental)) |
 | `ardMediaPath` | string | `media` | Path of the relay's media WebSocket, used by `highperf` |
+| `ardHpVirtualDisplay` | boolean | `true` | In `highperf`, ask the Mac for a virtual display at 3840×2160. `false` shows its real displays |
 | `ardHpFeedback` | string | all | Which RTCP the viewer sends in `highperf`: a comma list of `rr`, `ack`, `rctl`. For protocol testing |
 | `ardEncryption` | integer | `2` | Encryption mode: `1` = keystroke-only, `2` = full tunnel |
 | `ardControlMode` | integer | `1` | Control mode: `0` = observe, `1` = shared, `2` = exclusive |

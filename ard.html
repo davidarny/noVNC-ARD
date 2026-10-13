@@ -193,6 +193,9 @@
             acks: ardHpFeedbackParam.split(',').includes('ack'),
             rateControl: ardHpFeedbackParam.split(',').includes('rctl'),
         };
+        // ardHpVirtualDisplay: false shows the Mac's real displays instead of
+        // a virtual display created for the viewer
+        const ardHpVirtualDisplay = getParamCI('ardHpVirtualDisplay') !== 'false';
         let ardHpSupported = false;
         let ardHpDisabled = false;
         const ardHpSupportCheck = ardInitialQuality === 'highperf'
@@ -761,6 +764,7 @@
                     UI.rfb._ardHpAllowed = ardHpSupported && !ardHpDisabled;
                     UI.rfb._ardHpMediaUrl = ardHpMediaUrl();
                     UI.rfb._ardHpFeedback = ardHpFeedback;
+                    UI.rfb._ardHpVirtualDisplay = ardHpVirtualDisplay;
                     UI.rfb.addEventListener('ardhpstate', (e) => {
                         const d = e.detail;
                         if (d.state === 'streaming') {
