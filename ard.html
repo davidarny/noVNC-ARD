@@ -284,7 +284,7 @@
             if (UI.rfb && UI.rfb._ardServerInitSeen && !UI.rfb._ardHpOffered()) {
                 return 'this Mac does not offer it';
             }
-            if (ardHpDisabled) return 'it failed on the last attempt';
+            if (ardHpDisabled) return 'it failed on the last attempt (connect again to retry)';
             return null;
         }
 
@@ -1105,7 +1105,12 @@
             // The user clicked Connect: once signed in, ask what kind of
             // session to open, unless the URL has decided. Reconnects and
             // autoconnect come without an event and reuse the choice made.
-            if (evt instanceof Event) ardAskOnThisConnect = !ardForcedChoice;
+            if (evt instanceof Event) {
+                ardAskOnThisConnect = !ardForcedChoice;
+                // Connecting by hand gives High Performance another chance.
+                // With the session decided by the URL no dialog would.
+                ardHpDisabled = false;
+            }
             ardHpAttempt = null;
 
             _origUIConnect.call(UI, evt, password);
