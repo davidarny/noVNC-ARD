@@ -104,7 +104,26 @@ describe('Virtual display of a chosen size', () => {
         strictEqual(msg.length, 12 + 156 + 28);
         strictEqual(view.getUint16(12 + 154), 1);
         deepStrictEqual([0, 4, 8, 12].map(o => view.getUint32(12 + 156 + o)), [3200, 1800, 1600, 900]);
-        deepStrictEqual([view.getUint32(12 + 138), view.getUint32(12 + 142)], [3200, 1800]);
+    });
+
+    // A display is never later made wider or taller than the largest size
+    // it was made with, so it is made with room for any size asked for here.
+    it('makes the display with room for the largest picture, whatever its first size', () => {
+        for (const size of [{ width: 1600, height: 900, scale: 2 }, { width: 1618, height: 762, scale: 1 }]) {
+            const display = virtualDisplayFor(size);
+            deepStrictEqual(display.largest, { pixelWidth: 3840, pixelHeight: 2160 });
+            const view = new DataView(buildVirtualDisplayMessage([display]).buffer);
+            deepStrictEqual([view.getUint32(12 + 138), view.getUint32(12 + 142)], [3840, 2160]);
+        }
+    });
+
+    it('never states a largest size smaller than one of its modes', () => {
+        const display = {
+            name: 'A', largest: { pixelWidth: 1000, pixelHeight: 3000 },
+            modes: [{ pixelWidth: 2560, pixelHeight: 1440, width: 1280, height: 720, refresh: 60 }],
+        };
+        const view = new DataView(buildVirtualDisplayMessage([display]).buffer);
+        deepStrictEqual([view.getUint32(12 + 138), view.getUint32(12 + 142)], [2560, 3000]);
     });
 });
 

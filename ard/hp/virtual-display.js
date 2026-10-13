@@ -19,7 +19,7 @@
  *   2  128   name, zero padded
  * 130    4   width in millimetres  (float), at 132 points to the inch
  * 134    4   height in millimetres (float)
- * 138    4   largest width in pixels
+ * 138    4   largest width in pixels the display will ever have
  * 142    4   largest height in pixels
  * 146    6   0
  * 152    2   7
@@ -32,6 +32,12 @@
  *
  * The meaning of the constants 1 and 7 is not known; they are sent as
  * observed.
+ *
+ * The server keeps a display it has made while a viewer of that user
+ * remains, and for some seconds after. A later request changes the mode of
+ * that display, but never to one wider or taller in pixels than the largest
+ * size it was made with: the server then gives fewer pixels than asked, or
+ * keeps the old size and sends no picture.
  */
 
 export const MSG_VIRTUAL_DISPLAY = 0x1d;
@@ -63,7 +69,9 @@ const MIN_HEIGHT = 480;
  * A display of one mode: `width` × `height` points, drawn at `scale` pixels
  * to the point (2 is what Apple calls HiDPI). The size is brought within
  * what servers are known to send, keeping its shape, and the pixel
- * dimensions are made even, as video needs.
+ * dimensions are made even, as video needs. Its largest size is the largest
+ * this function ever asks for, so that a display made for one size can be
+ * given any other on a later connection.
  */
 export function virtualDisplayFor({ width, height, scale = 2 }) {
     if (!(width > 0 && height > 0 && scale > 0)) throw new Error('virtual display: bad size');
@@ -74,6 +82,7 @@ export function virtualDisplayFor({ width, height, scale = 2 }) {
     const h = even(height * fit * grow);
     return {
         name: DEFAULT_VIRTUAL_DISPLAY.name,
+        largest: { pixelWidth: MAX_PIXEL_WIDTH, pixelHeight: MAX_PIXEL_HEIGHT },
         modes: [{
             pixelWidth: Math.min(MAX_PIXEL_WIDTH, even(w * scale)),
             pixelHeight: Math.min(MAX_PIXEL_HEIGHT, even(h * scale)),
@@ -121,8 +130,10 @@ function displayRecord(display) {
     const record = new Uint8Array(length);
     const view = new DataView(record.buffer);
     const first = modes[0];
-    const maxWidth = Math.max(...modes.map(m => m.pixelWidth));
-    const maxHeight = Math.max(...modes.map(m => m.pixelHeight));
+    // `largest` is optional; without it, the largest of the modes
+    const largest = display.largest || { pixelWidth: 0, pixelHeight: 0 };
+    const maxWidth = Math.max(largest.pixelWidth, ...modes.map(m => m.pixelWidth));
+    const maxHeight = Math.max(largest.pixelHeight, ...modes.map(m => m.pixelHeight));
 
     view.setUint16(0, length);
     record.set(name, 2);
