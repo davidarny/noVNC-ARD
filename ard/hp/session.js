@@ -56,15 +56,19 @@ export class HpSession {
      * mediaUrl:        WebSocket URL of the relay's media endpoint
      * sendOffer(bytes): send the 0x1c message on the RFB connection
      * createSink({ width, height, stripes, onFirstFrame, onError }): → { push(picture), close() }
+     * createAudio():   optional; resolves to { push(rtp), close() } that plays the sound.
+     *                  Without it, or if it fails, audio packets are counted and dropped.
      * onState(state, reason): called on every state change
      * feedback:        { reports, acks, rateControl } — which RTCP to send
      * endpoint:        how the viewer describes itself in the offer
      */
-    constructor({ mediaUrl, sendOffer, createSink, onState, feedback, endpoint,
+    constructor({ mediaUrl, sendOffer, createSink, createAudio, onState, feedback, endpoint,
                   WebSocketImpl, now, log }) {
         this._mediaUrl = mediaUrl;
         this._sendOffer = sendOffer;
         this._createSink = createSink;
+        this._createAudio = createAudio;
+        this._audio = null;
         this._onState = onState || (() => {});
         this._feedback = Object.assign({ reports: true, acks: true, rateControl: true }, feedback);
         this._endpoint = endpoint;
@@ -145,6 +149,11 @@ export class HpSession {
             this._sink.close();
             this._sink = null;
         }
+        if (this._audio) {
+            this._audio.close();
+            this._audio = null;
+        }
+        this._torn = true;
         if (this._ws) {
             const ws = this._ws;
             this._ws = null;
@@ -253,6 +262,15 @@ export class HpSession {
                   ', ' + answer.video.stripes + ' stripes');
         this._setState('waiting');
 
+        // Sound is a bonus: the picture does not wait for it, and its
+        // failure is not the session's.
+        if (this._createAudio) {
+            Promise.resolve().then(() => this._createAudio()).then((audio) => {
+                if (this._torn) audio.close();
+                else { this._audio = audio; this._log('audio ready'); }
+            }, e => this._log('no audio: ' + (e && e.message ? e.message : e)));
+        }
+
         // Datagrams that arrived while the keys were being derived.
         const early = this._early || [];
         this._early = null;
@@ -304,6 +322,7 @@ export class HpSession {
             if (channel === CHANNEL_AUDIO) {
                 this.stats.audioPackets++;
                 this._audioSeq.update(rtp.seq);
+                if (this._audio) this._audio.push(rtp);
                 return;
             }
             this.stats.videoPackets++;

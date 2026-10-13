@@ -55,6 +55,7 @@ open http://localhost:6088/ard.html
 | `ardQuality` | string | `adaptive` | Initial quality preset: `halftone`, `gray`, `thousands`, `millions`, `adaptive`, `highperf` (experimental, see [High Performance Mode](#high-performance-mode-experimental)) |
 | `ardMediaPath` | string | `media` | Path of the relay's media WebSocket, used by `highperf` |
 | `ardHpVirtualDisplay` | boolean | `true` | In `highperf`, ask the Mac for a virtual display at 3840×2160. `false` shows its real displays |
+| `ardHpAudio` | boolean | `true` | In `highperf`, play the Mac's sound |
 | `ardHpFeedback` | string | all | Which RTCP the viewer sends in `highperf`: a comma list of `rr`, `ack`, `rctl`. For protocol testing |
 | `ardEncryption` | integer | `2` | Encryption mode: `1` = keystroke-only, `2` = full tunnel |
 | `ardControlMode` | integer | `1` | Control mode: `0` = observe, `1` = shared, `2` = exclusive |
@@ -122,7 +123,7 @@ All presets include standard fallback encodings (CopyRect, Hextile, RRE) and ARD
 
 macOS 14 and later can send the screen as HEVC video over UDP instead of framebuffer updates: Screen Sharing's "High Performance" connection type. `?ardQuality=highperf` asks for it.
 
-**Status: not yet tested against a live server.** The receive path is verified against captured sessions; whether a server accepts this viewer's offer is unknown. Video only; audio is negotiated and discarded.
+**Status: works against macOS 27 servers** (first live sessions 2026-10-12): the Mac creates a virtual display for the viewer and sends it at 3840×2160; sound plays. Experimental all the same: one relay, one session, no recovery from packet loss.
 
 The server sends the media as UDP to the address of its TCP peer, which a browser cannot receive, so websockify is not enough. Use the relay in `relay/`, which bridges TCP like websockify and also carries the UDP over a second WebSocket:
 
@@ -141,7 +142,13 @@ Requirements:
 
 The mode is chosen when the connection is made. If it cannot start, the page logs the reason and reconnects as `adaptive`. The picture is drawn at the display's pixel resolution on a canvas laid over noVNC's own, which keeps handling input and the cursor.
 
-The protocol code is in `ard/hp/`: negotiation (`negotiation.js`, `offer-template.js`, `plist.js`, `protobuf.js`, `zlib.js`), SRTP (`srtp.js`), picture reassembly (`rtp-video.js`), RTCP feedback (`feedback.js`), decoding and painting (`video-sink.js`, `hevc.js`) and the session that ties them together (`session.js`).
+The protocol code is in `ard/hp/`: negotiation (`negotiation.js`, `offer-template.js`, `virtual-display.js`, `plist.js`, `protobuf.js`, `zlib.js`), SRTP (`srtp.js`), picture reassembly (`rtp-video.js`), RTCP feedback (`feedback.js`), decoding and painting (`video-sink.js`, `hevc.js`), sound (`audio.js`, `rtp-audio.js`, `audio-decoder.js`, `audio-sink.js`, `pcm-worklet.js`, `pcm-ring.js`) and the session that ties them together (`session.js`).
+
+### Sound and the bundled decoder
+
+The sound is AAC-ELD, which no browser decodes. `ard/hp/vendor/libav/` holds FFmpeg's AAC decoder compiled to WebAssembly as a [libav.js](https://github.com/Yahweasel/libav.js) variant with nothing else in it (about 1 MB). It is loaded only when a High Performance session starts with sound on.
+
+That binary is FFmpeg under the **LGPL 2.1 or later**; the libav.js wrapper around it is 0-clause BSD. The exact sources it was built from are in `ard/hp/vendor/libav/sources/`, and `tools/build-libav.sh` rebuilds it (needs Docker). This applies to the files in that directory only; the rest of noVNC-ARD keeps its own licence.
 
 ## Project Structure
 

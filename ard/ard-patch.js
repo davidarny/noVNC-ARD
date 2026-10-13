@@ -1516,6 +1516,9 @@ RFB.prototype._ardHpStart = function () {
         endpoint: this._ardHpEndpoint,
         sendOffer: bytes => RFB.messages.ardMediaStreamNegotiation(this._sock, bytes),
         createSink: opts => new VideoSink(Object.assign({ target: this._canvas }, opts)),
+        // Loaded only when wanted: it brings a WebAssembly decoder with it.
+        createAudio: this._ardHpAudio === false ? null
+            : () => import('./hp/audio.js').then(m => m.AudioPipeline.create()),
         onState: (state, reason) => this._ardHpOnState(state, reason),
         log: msg => Log.Info("ARD HP: " + msg),
     });

@@ -196,6 +196,8 @@
         // ardHpVirtualDisplay: false shows the Mac's real displays instead of
         // a virtual display created for the viewer
         const ardHpVirtualDisplay = getParamCI('ardHpVirtualDisplay') !== 'false';
+        // ardHpAudio: false leaves the Mac's sound unplayed
+        const ardHpAudio = getParamCI('ardHpAudio') !== 'false';
         let ardHpSupported = false;
         let ardHpDisabled = false;
         const ardHpSupportCheck = ardInitialQuality === 'highperf'
@@ -765,6 +767,7 @@
                     UI.rfb._ardHpMediaUrl = ardHpMediaUrl();
                     UI.rfb._ardHpFeedback = ardHpFeedback;
                     UI.rfb._ardHpVirtualDisplay = ardHpVirtualDisplay;
+                    UI.rfb._ardHpAudio = ardHpAudio;
                     UI.rfb.addEventListener('ardhpstate', (e) => {
                         const d = e.detail;
                         if (d.state === 'streaming') {

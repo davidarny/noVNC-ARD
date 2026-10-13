@@ -442,6 +442,39 @@ describe('High Performance session', () => {
         strictEqual(states[states.length - 1], 'failed:stalled');
     });
 
+    it('hands audio packets to the audio pipeline once it is ready, and closes it', async () => {
+        const audio = { packets: [], closed: false, push(rtp) { this.packets.push(rtp.seq); }, close() { this.closed = true; } };
+        const keys = await negotiate({ createAudio: async () => audio });
+        const audioIn = await createContext(keys.audio.fromServer.key, keys.audio.fromServer.salt);
+        await settle();
+        ws.deliver(CHANNEL_AUDIO, await audioIn.protectRtp(audioPacket(7)));
+        ws.deliver(CHANNEL_AUDIO, await audioIn.protectRtp(audioPacket(8)));
+        await until(() => audio.packets.length === 2, 'two audio packets');
+        deepStrictEqual(audio.packets.sort(), [7, 8]);
+        session.close();
+        ok(audio.closed);
+    });
+
+    it('carries on without sound when the audio pipeline cannot be made', async () => {
+        const keys = await negotiate({ createAudio: async () => { throw new Error('no AudioWorklet'); } });
+        const audioIn = await createContext(keys.audio.fromServer.key, keys.audio.fromServer.salt);
+        await settle();
+        ws.deliver(CHANNEL_AUDIO, await audioIn.protectRtp(audioPacket(7)));
+        await until(() => session.stats.audioPackets === 1, 'the audio packet');
+        strictEqual(session.state, 'waiting');
+    });
+
+    it('closes an audio pipeline that becomes ready after the session has ended', async () => {
+        let ready;
+        const audio = { closed: false, push() {}, close() { this.closed = true; } };
+        await negotiate({ createAudio: () => new Promise((resolve) => { ready = resolve; }) });
+        await until(() => typeof ready === 'function', 'audio creation to start');
+        session.close();
+        ready(audio);
+        await settle();
+        ok(audio.closed);
+    });
+
     it('closes quietly', async () => {
         await negotiate();
         session.close();
