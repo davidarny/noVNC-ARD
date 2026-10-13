@@ -1594,8 +1594,9 @@ RFB.prototype._ardHpRequestVirtualDisplay = function () {
 // Ask the server, on the open connection, for a new picture size: send a
 // fresh VirtualDisplay (0x1d) and have the session re-offer, the way Apple's
 // viewer follows its window. Only while High Performance is streaming on a
-// virtual display. Whether the server acts on it may depend on that
-// display's "Dynamic resolution" setting.
+// virtual display. The server acts on it whether or not that display's
+// "Dynamic resolution" setting is on (confirmed against macOS 27); the
+// setting only makes Apple's own viewer follow its window.
 RFB.prototype._ardHpResize = function (display) {
     if (!this._ardHp || this._ardHp.state !== 'streaming') return false;
     if (!this.ardOnVirtualDisplay() || !display) return false;
