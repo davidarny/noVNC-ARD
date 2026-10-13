@@ -289,6 +289,9 @@ RFB.prototype._initMsg = function () {
     if (this._rfbInitState === 'ArdSessionSelect' && this._rfbAppleARD) {
         return this._ardSessionSelect();
     }
+    if (this._rfbInitState === 'ArdSessionChoice' && this._rfbAppleARD) {
+        return false; // Blocked — waiting for the page to call ardContinueSession()
+    }
     return _origInitMsg.call(this);
 };
 
@@ -373,10 +376,20 @@ RFB.prototype._negotiateServerInit = function () {
     }
 
 
-    // Normal (non-session-select) path — matches ARD init order:
-    // ViewerInfo → SetMode → SetDisplay → AutoPasteboard
-    // → SetEncodings → PixelFormat → SetEncodings
-    // → SetEncryption → FBUpdateRequest
+    // The page may want to ask the user what kind of session to open, now
+    // that the server has introduced itself and before anything is asked
+    // of it. Apple's viewer shows its choice of screen sharing type here.
+    if (this._ardPauseForSessionChoice(() => this._ardNormalInit(width, height))) {
+        return true;
+    }
+    return this._ardNormalInit(width, height);
+};
+
+// Normal (non-session-select) path — matches ARD init order:
+// ViewerInfo → SetMode → SetDisplay → AutoPasteboard
+// → SetEncodings → PixelFormat → SetEncodings
+// → SetEncryption → FBUpdateRequest
+RFB.prototype._ardNormalInit = function (width, height) {
     RFB.messages.ardViewerInfo(this._sock);
     RFB.messages.ardSetMode(this._sock, this._ardControlMode || 1);
     this._ardHpRequestVirtualDisplay();
@@ -851,11 +864,49 @@ RFB.prototype._ardSessionSelect = function () {
 
 // Public API: UI calls this to resume session select after user picks a session type.
 // command: 1 = ConnectToConsole (share display), 2 = ConnectToVirtualDisplay
+// ===== Session choice: a pause for the page, after sign-in =====
+//
+// With _ardAskSessionChoice set, the connection stops once the server has
+// sent its ServerInit (and the session has been granted, where the server
+// asks about that) and dispatches 'ardsessionchoice'. The page sets what it
+// wants — quality preset, High Performance — and calls
+// ardContinueSession(). Nothing has been asked of the server yet, so
+// everything can still be decided. A page that answered 'ardsessionselect'
+// has already been asked and is not asked again.
+
+RFB.prototype._ardPauseForSessionChoice = function (resume) {
+    if (!this._ardAskSessionChoice || this._ardSessionChoiceMade) return false;
+    this._ardSessionChoiceResume = resume;
+    this._rfbInitState = 'ArdSessionChoice';
+    Log.Info("ARD: waiting for the session choice");
+    this.dispatchEvent(new CustomEvent('ardsessionchoice', {
+        detail: {
+            serverFlags: this._ardServerFlags,
+            capabilityBitmap: this._ardCapabilityBitmap,
+            username: this._ardSessionSelectConsoleUser || '',
+        }
+    }));
+    return true;
+};
+
+RFB.prototype.ardContinueSession = function () {
+    if (this._rfbInitState !== 'ArdSessionChoice' || !this._ardSessionChoiceResume) {
+        Log.Warn("ardContinueSession called but no session choice is pending");
+        return;
+    }
+    const resume = this._ardSessionChoiceResume;
+    this._ardSessionChoiceResume = null;
+    this._ardSessionChoiceMade = true;
+    resume();
+};
+
 RFB.prototype.selectSessionType = function (command) {
     if (this._ardSessionSelectStage !== 'waitingForUI') {
         Log.Warn("selectSessionType called but not in waitingForUI state");
         return;
     }
+    // The page has asked the user; do not ask again once it is granted.
+    this._ardSessionChoiceMade = true;
     this._ardSessionType = command;
     const user = this._ardSessionSelectConsoleUser || '';
     RFB.messages.ardSessionCommand(this._sock, command, user);
@@ -867,6 +918,9 @@ RFB.prototype.selectSessionType = function (command) {
 // Post-session-select initialization: send protocol setup messages,
 // then transition to connected WITHOUT sending FBUpdateRequest (0x0 dimensions)
 RFB.prototype._ardPostSessionInit = function () {
+    if (this._ardPauseForSessionChoice(() => this._ardPostSessionInit())) {
+        return;
+    }
     Log.Info("ARD: Session granted — sending protocol setup");
 
     // Same init order as normal path

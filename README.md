@@ -81,6 +81,7 @@ open http://localhost:6088/ard.html
 | `ardCurtainUnlock()` | Unlock remote screen |
 | `requestFullUpdate()` | Request full framebuffer update |
 | `selectSessionType(command)` | Resume session select: `1` = console, `2` = virtual display |
+| `ardContinueSession()` | Resume after `ardsessionchoice` |
 
 ### Properties
 
@@ -98,6 +99,7 @@ open http://localhost:6088/ard.html
 | Event | Detail | Description |
 |-------|--------|-------------|
 | `ardsessionselect` | `{ username, allowedCommands, hasConsoleUser }` | Server requests session type selection |
+| `ardsessionchoice` | `{ serverFlags, capabilityBitmap, username }` | Signed in and waiting, before anything is asked of the server. Only when `_ardAskSessionChoice` is set; set the quality preset, then call `ardContinueSession()` |
 | `arduserinfo` | `{ username, hasAvatar }` | Remote user info received |
 | `arddisplayinfo` | `{ width, height, displays }` | Display list received or changed. Each display has `id`, `main`, `w`, `h` |
 | `ardcurtainchange` | `{ active }` | Curtain lock state changed |
@@ -126,7 +128,7 @@ All presets include standard fallback encodings (CopyRect, Hextile, RRE) and ARD
 
 macOS 14 and later can send the screen as HEVC video over UDP instead of framebuffer updates: Screen Sharing's "High Performance" connection type.
 
-Clicking Connect opens a dialog: **Share Display**, or **Virtual Display** in **High Performance** or **Standard** quality. Standard is the ordinary virtual login, as before; High Performance has the Mac create one virtual display at 3840×2160. The last choice is remembered. High Performance is greyed out, with the reason, when the browser cannot decode it or the connection has no media channel. `?ardSessionType=highperf` (or `?ardQuality=highperf`) chooses it without the dialog. During a High Performance session the toolbar has a button to mute the Mac's sound, and the info panel shows the picture size, bit rate and whether sound is playing.
+Once signed in, a dialog asks what kind of session to open: **Share Display**, or **Virtual Display** in **High Performance** or **Standard** quality. It comes after sign-in, as in Apple's Screen Sharing, because only then is it known what the connection can do; the same dialog answers the Mac's own question when someone else is using its display. Standard is the ordinary virtual login, as before; High Performance has the Mac create one virtual display at 3840×2160. The last choice is remembered, and reconnects do not ask again. High Performance is greyed out, with the reason, when the browser cannot decode it or the relay has no media channel (checked while the dialog is open). `?ardSessionType=highperf` (or `?ardQuality=highperf`) chooses it without the dialog. During a High Performance session the toolbar has a button to mute the Mac's sound, and the info panel shows the picture size, bit rate and whether sound is playing.
 
 **Status: works against macOS 27 servers** (first live sessions 2026-10-12): the Mac creates a virtual display for the viewer and sends it at 3840×2160; sound plays. Experimental all the same: one relay, one session, no recovery from packet loss.
 

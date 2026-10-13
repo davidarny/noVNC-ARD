@@ -17,6 +17,9 @@ import { createContext } from './srtp.js';
 import { VideoAssembler } from './rtp-video.js';
 import { receiverReport, pictureAck, rateControl } from './feedback.js';
 
+// WebSocket subprotocol a relay's media endpoint answers to.
+export const MEDIA_SUBPROTOCOL = 'ard-media';
+
 export const CHANNEL_AUDIO = 0;
 export const CHANNEL_VIDEO = 1;
 
@@ -122,7 +125,7 @@ export class HpSession {
         if (this.state !== 'idle' || this._ws) return;
         let ws;
         try {
-            ws = new this._WebSocket(this._mediaUrl);
+            ws = new this._WebSocket(this._mediaUrl, MEDIA_SUBPROTOCOL);
         } catch (e) {
             this._fail('media-connect', e.message);
             return;
@@ -130,6 +133,13 @@ export class HpSession {
         ws.binaryType = 'arraybuffer';
         this._ws = ws;
         ws.onopen = () => {
+            // A plain TCP proxy accepts any path and would hand us the
+            // server's RFB greeting here. Only a relay's media endpoint
+            // agrees to the subprotocol.
+            if (ws.protocol !== MEDIA_SUBPROTOCOL) {
+                this._fail('media-connect', 'not a media channel');
+                return;
+            }
             this._wsOpen = true;
             this._log('media channel open');
             this._maybeOffer();

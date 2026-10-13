@@ -43,8 +43,9 @@ async function until(condition, what = 'condition') {
 }
 
 class FakeWebSocket {
-    constructor(url) {
+    constructor(url, protocol) {
         this.url = url;
+        this.protocol = FakeWebSocket.refuseProtocol ? '' : protocol;
         this.sent = [];
         this.closed = false;
         FakeWebSocket.last = this;
@@ -237,6 +238,23 @@ describe('High Performance session', () => {
         session.handleMessage1(message1());
         await settle();
         strictEqual(offers.length, 1);
+    });
+
+    it('refuses an endpoint that is not a media channel', () => {
+        FakeWebSocket.refuseProtocol = true;
+        try {
+            create();
+            ws.open();
+            deepStrictEqual(states, ['failed:media-connect']);
+            strictEqual(session.failure, 'media-connect: not a media channel');
+        } finally {
+            FakeWebSocket.refuseProtocol = false;
+        }
+    });
+
+    it('asks the endpoint for the media subprotocol', () => {
+        create();
+        strictEqual(ws.protocol, 'ard-media');
     });
 
     it('fails when the media channel does not open', () => {
