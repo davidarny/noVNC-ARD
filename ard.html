@@ -229,7 +229,7 @@
         // drag is on the window frame, not the document, so there is no
         // release event to wait for. We commit once the size has been still
         // this long, and sooner if a pointer release does reach the page.
-        const ARD_FOLLOW_DEBOUNCE_MS = 500;   // after the size stops changing
+        const ARD_FOLLOW_DEBOUNCE_MS = 350;   // after the size stops changing
         const ARD_FOLLOW_MIN_CHANGE = 24;     // points; ignore smaller jitters
         let ardFollowTimer = null;
         let ardFollowLast = null;             // { width, height } last asked for
