@@ -167,17 +167,15 @@ The protocol code is in `ard/hp/`: negotiation (`negotiation.js`, `offer-templat
 ard.html?ardSessionType=virtual&ardResolution=window
 ```
 
-The display is sized when the session is set up. **Resizing the window afterwards does not change it**: disconnect and connect again for the new size.
+The display is sized when the session is set up. **Resizing the window afterwards does not change it.**
 
 What to know:
 
-- `window` asks for one pixel to the point, which the Mac tried honoured exactly each time the display was made fresh. `window@2` asks for two (HiDPI): it worked once and was not honoured at other times, so it is there to try, not to rely on.
-- **The Mac keeps the display it has.** A request for another size is only followed when the earlier display is gone; a Mac that still has one attaches the new session to it at the old size. How long it takes to let go of a display after the last viewer leaves is not known.
+- `window` asks for one pixel to the point. `window@2` asks for two (HiDPI).
+- **The Mac makes a display to order only when it has none.** If one is left over from an earlier session, the new session is attached to it at the size it has, whatever was asked. How long a Mac keeps a display after its last viewer has left is not known, and it varied.
 - Sessions of the same user share one virtual display.
-- A Mac that reports no display within 8 seconds of being asked gets no further requests from this page, which says so; disconnect and connect again.
+- Do not try to change the size by reconnecting quickly. That was tried: the Mac kept the old size, then lost the display and sent no picture to any viewer until Screen Sharing was restarted on it (`sudo launchctl kickstart -k system/com.apple.screensharing`).
 - Tried against one Apple silicon Mac (macOS 27), from one browser, in one night.
-
-**Following the window (`ardResizeReconnect=true`) is experimental and off.** It reconnects 1.2 seconds after the window has stopped changing, if the size differs by 24 points or more, and asks for the new size. On its first run against a Mac the Mac kept the old size, then lost the display altogether and sent no picture to any viewer until Screen Sharing was restarted on it (`sudo launchctl kickstart -k system/com.apple.screensharing`). Do not use it against a Mac you cannot restart.
 
 ### Sound and the bundled decoder
 

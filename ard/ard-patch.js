@@ -1586,11 +1586,6 @@ RFB.prototype._ardHpRequestVirtualDisplay = function () {
                  (sizedStandard ? " (Standard quality, experimental)" : ""));
     }
     RFB.messages.ardVirtualDisplay(this._sock, buildVirtualDisplayMessage(display ? [display] : undefined));
-    if (display) {
-        // For the page: what was asked, to compare with the window later
-        // and to notice a server that never reports the display
-        this.dispatchEvent(new CustomEvent("arddisplayrequest", { detail: display.modes[0] }));
-    }
 };
 
 // Full encryption has been asked for and has not started yet. Until it
