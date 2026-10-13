@@ -145,6 +145,7 @@ Requirements:
 
 - A browser that decodes HEVC 4:4:4 through WebCodecs. Chrome, Edge and Safari on Apple silicon do; Firefox does not. Otherwise the page connects as `adaptive`.
 - The relay must be reachable from the Mac on UDP 5900 and 5901, and those ports must be free on the relay's machine.
+- A machine fast enough: nothing can be left out of the stream, so a viewer that stays more than half a second behind for two seconds ends the session and carries on in Standard. Decryption runs on the page's main thread; measured in Chrome on Apple silicon it takes about 1 ms a packet at 7,500 packets a second (50 Mbit/s) without holding up the page.
 - One High Performance session per relay: the newest takes the media. The session dialog says when another viewer is using it.
 
 Encryption: the picture and the sound are always encrypted (SRTP), with keys the viewer chooses and sends to the Mac on the RFB connection. With `ardEncryption=2` that connection is encrypted, and the keys are not sent before it is. With `ardEncryption=1` only sign-in and keystrokes are, so the keys cross the network in the clear and anyone who records the whole session can decrypt its media: use mode 1 only on a network you trust, or inside a tunnel.

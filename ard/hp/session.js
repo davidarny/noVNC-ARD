@@ -33,6 +33,15 @@ const REPORT_MS = 1000;
 const RATE_CONTROL_MS = 50;
 const IDLE_BANDWIDTH_KBIT = 60000;
 
+// Nothing can be dropped from the stream without spoiling what follows, so
+// a viewer that cannot keep up falls further and further behind. Half a
+// second of pictures waiting for the decoder, or this many packets waiting
+// to be decrypted, is normal for a moment when a stream starts; lasting
+// this long it is a machine that is too slow, and the session ends.
+const OVERLOAD_PICTURES = 120;
+const OVERLOAD_PACKETS = 2000;
+const OVERLOAD_MS = 2000;
+
 function isRtcp(packet) {
     return packet.length > 1 && packet[1] >= 192 && packet[1] <= 223;
 }
@@ -59,6 +68,7 @@ export class HpSession {
      * holdOffer:       true if the RFB connection is still to be encrypted. The offer
      *                  carries the media keys, so it waits for releaseOffer().
      * createSink({ width, height, stripes, onFirstFrame, onError }): → { push(picture), close() }
+     *                  and optionally `backlog`, the pictures it has not decoded yet
      * createAudio():   optional; resolves to { push(rtp), close() } that plays the sound.
      *                  Without it, or if it fails, audio packets are counted and dropped.
      * onState(state, reason): called on every state change
@@ -103,6 +113,8 @@ export class HpSession {
         this._videoSeq = new SeqTracker();
         this._lastVideoPacketAt = null;
         this._lastSenderReport = [null, null];   // per channel: { middle, at }
+        this._decrypting = 0;                    // packets handed to SRTP and not back yet
+        this._overloadedSince = null;
     }
 
     // The picture size and stripe count from the server's answer.
@@ -361,7 +373,9 @@ export class HpSession {
             return;
         }
 
+        this._decrypting++;
         ctx.unprotectRtp(packet).then((rtp) => {
+            this._decrypting--;
             if (!rtp) { this.stats.authFailures++; return; }
             if (this.state === 'failed' || this.state === 'closed') return;
             if (channel === CHANNEL_AUDIO) {
@@ -375,7 +389,10 @@ export class HpSession {
             this._lastVideoPacketAt = this._now();
             if (rtp.ssrc === this._answer.video.ssrc) this._videoSeq.update(rtp.seq);
             this._assembler.push(rtp, this._now());
-        }, () => { this.stats.authFailures++; });
+        }, () => {
+            this._decrypting--;
+            this.stats.authFailures++;
+        });
     }
 
     _onPicture(picture) {
@@ -407,9 +424,22 @@ export class HpSession {
         }).catch(() => {});
     }
 
+    // End the session when the machine has been behind for too long.
+    _checkLoad(now) {
+        const backlog = (this._sink && this._sink.backlog) || 0;
+        if (backlog <= OVERLOAD_PICTURES && this._decrypting <= OVERLOAD_PACKETS) {
+            this._overloadedSince = null;
+        } else if (this._overloadedSince === null) {
+            this._overloadedSince = now;
+        } else if (now - this._overloadedSince >= OVERLOAD_MS) {
+            this._fail('overloaded', backlog + ' pictures and ' + this._decrypting + ' packets behind');
+        }
+    }
+
     _tick() {
         const now = this._now();
         if (this._assembler) this._assembler.tick(now);
+        this._checkLoad(now);
         if (!this._feedback.rateControl || this.state === 'failed') return;
         const sinceLast = this._lastVideoPacketAt === null ? 0 : now - this._lastVideoPacketAt;
         this._sendRtcp(CHANNEL_VIDEO, rateControl({

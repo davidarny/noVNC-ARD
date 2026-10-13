@@ -544,6 +544,39 @@ describe('High Performance session', () => {
         strictEqual(states[states.length - 1], 'failed:stalled');
     });
 
+    // Let time pass as it does, one timer period at a time.
+    function pass(ms) {
+        for (let t = 0; t < ms; t += 50) mock.timers.tick(50);
+    }
+
+    it('fails when the decoder stays behind, and not when it catches up', async () => {
+        await negotiate();
+        sinks[0].opts.onFirstFrame();
+
+        // Behind for a moment, as when a stream starts.
+        sinks[0].backlog = 500;
+        pass(1900);
+        strictEqual(session.state, 'streaming');
+        sinks[0].backlog = 3;
+        pass(100);
+        sinks[0].backlog = 500;
+        pass(1900);
+        strictEqual(session.state, 'streaming');
+
+        // Behind and staying there.
+        pass(200);
+        strictEqual(states[states.length - 1], 'failed:overloaded');
+        ok(sinks[0].closed);
+    });
+
+    it('does not mind a backlog within what a decoder normally holds', async () => {
+        await negotiate();
+        sinks[0].opts.onFirstFrame();
+        sinks[0].backlog = 120;
+        pass(10000);
+        strictEqual(session.state, 'streaming');
+    });
+
     it('hands audio packets to the audio pipeline once it is ready, and closes it', async () => {
         const audio = { packets: [], closed: false, push(rtp) { this.packets.push(rtp.seq); }, close() { this.closed = true; } };
         const keys = await negotiate({ createAudio: async () => audio });
