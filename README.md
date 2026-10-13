@@ -56,7 +56,7 @@ open http://localhost:6088/ard.html
 | `ardSessionType` | string | ask | Skips the session dialog: `share` (the Mac's own displays), `virtual` (virtual login, standard quality) or `highperf` (virtual display in High Performance) |
 | `ardMediaPath` | string | `media` | Path of the relay's media WebSocket, used by `highperf` |
 | `ardHpVirtualDisplay` | boolean | `true` | In `highperf`, ask the Mac for a virtual display at 3840×2160. `false` shows its real displays |
-| `ardResolution` | string | — | The size of the virtual display to ask the Mac for, in a virtual display login of either quality. In points: `1600x900` (drawn at 2 pixels to the point), `2560x1440@1` (with the scale, 1 or 2), `window` (the size of the browser window, at 1) or `window@2`. The picture is kept within 3840×2160 pixels. With `window` the display **follows the window**: see "A display the size of the window". `ardHpResolution` is the same parameter under its first name |
+| `ardResolution` | string | — | The size of the virtual display to ask the Mac for, in a virtual display login of either quality. In points: `1600x900` (drawn at 2 pixels to the point), `2560x1440@1` (with the scale, 1 or 2), `window` (the size of the browser window, at 1) or `window@2`. The picture is kept within 3840×2160 pixels. See "A display the size of the window". `ardHpResolution` is the same parameter under its first name |
 | `ardHpAudio` | boolean | `true` | In `highperf`, play the Mac's sound |
 | `ardHpFeedback` | string | all | Which RTCP the viewer sends in `highperf`: a comma list of `rr`, `ack`, `rctl`. For protocol testing |
 | `ardEncryption` | integer | `2` | Encryption mode: `1` = keystroke-only, `2` = full tunnel |
@@ -167,14 +167,17 @@ The protocol code is in `ard/hp/`: negotiation (`negotiation.js`, `offer-templat
 ard.html?ardSessionType=virtual&ardResolution=window
 ```
 
-The size of a display cannot be changed while a session runs, so **resizing the window reconnects**: 1.2 seconds after the window has stopped changing, if it differs from the display by 24 points or more in either direction, the page says "Resizing the display…", connects again with the same sign-in and session choice, and asks for the new size. The session on the Mac carries on; only the display is made anew. A change of a few points (a scroll bar, a tool bar) is ignored, and dragging the edge about costs one reconnect, at the end.
+The display is sized when the session is set up. **Resizing the window afterwards does not change it**: disconnect and connect again for the new size.
 
 What to know:
 
-- `window` asks for one pixel to the point, which every Mac tried has honoured exactly. `window@2` asks for two (HiDPI): one Mac made such a display once, halved another and did not answer a third, so it is there to try, not to rely on.
-- A Mac that reports no display within 8 seconds of being asked is asked again at one pixel to the point, and failing that for nothing: the page says so and carries on with the Mac's own size.
-- Sessions of the same user share one virtual display. Two windows on one Mac's virtual display will each resize it under the other.
-- Tried against one Apple silicon Mac (macOS 27), from one browser, in one night. The reconnect on resize has not been run against a Mac at all yet.
+- `window` asks for one pixel to the point, which the Mac tried honoured exactly each time the display was made fresh. `window@2` asks for two (HiDPI): it worked once and was not honoured at other times, so it is there to try, not to rely on.
+- **The Mac keeps the display it has.** A request for another size is only followed when the earlier display is gone; a Mac that still has one attaches the new session to it at the old size. How long it takes to let go of a display after the last viewer leaves is not known.
+- Sessions of the same user share one virtual display.
+- A Mac that reports no display within 8 seconds of being asked gets no further requests from this page, which says so; disconnect and connect again.
+- Tried against one Apple silicon Mac (macOS 27), from one browser, in one night.
+
+**Following the window (`ardResizeReconnect=true`) is experimental and off.** It reconnects 1.2 seconds after the window has stopped changing, if the size differs by 24 points or more, and asks for the new size. On its first run against a Mac the Mac kept the old size, then lost the display altogether and sent no picture to any viewer until Screen Sharing was restarted on it (`sudo launchctl kickstart -k system/com.apple.screensharing`). Do not use it against a Mac you cannot restart.
 
 ### Sound and the bundled decoder
 

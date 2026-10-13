@@ -203,14 +203,19 @@
         // display to ask for, in a virtual display login of either quality.
         // In points: 1920x1080 (at 2 pixels to the point), 2560x1440@1
         // (with the scale), window (this window's size, at 1) or window@2.
-        // With window the display follows the window: when it has been
-        // resized, the page connects again and asks for the new size.
         // Default: nothing asked in Standard; in High Performance the
         // display Apple's viewer asks for, 1920x1080 at 2.
         const ardHpResolution = getParamCI('ardResolution') || getParamCI('ardHpResolution');
-        const ardFollowsWindow = /^window(@[12])?$/i.test(ardHpResolution || '');
-        // Raised when a Mac does not answer a request: 1 asks at one pixel
-        // to the point only, 2 asks for nothing.
+        // ardResizeReconnect=true: with window, follow the window: when
+        // it has been resized, connect again and ask for the new size.
+        // OFF unless asked for: on its first run against a Mac the Mac
+        // kept its display at the old size and then stopped sending
+        // anything, to this viewer and to the next ones, until its screen
+        // sharing was restarted.
+        const ardFollowsWindow = /^window(@[12])?$/i.test(ardHpResolution || '') &&
+                                 getParamCI('ardResizeReconnect') === 'true';
+        // Set to 2 when a Mac does not answer a request: nothing more is
+        // asked of it from this page.
         let ardDisplayRetreat = 0;
         function ardHpDisplay() {
             if (!ardHpResolution || ardDisplayRetreat >= 2) return null;
@@ -223,7 +228,6 @@
                 Log.Warn('ARD: ardResolution not understood: ' + ardHpResolution);
                 return null;
             }
-            if (ardDisplayRetreat >= 1) display.scale = 1;
             return display;
         }
 
@@ -249,16 +253,15 @@
                 ardReconnectOnPurpose('Resizing the display to ' + mode.width + ' × ' + mode.height + '…');
             },
             onSilent: (mode) => {
-                // Seen from a Mac asked for two pixels to the point at a
-                // size it would not make: no display, no picture, no word.
-                const wasDouble = mode.pixelWidth > mode.width;
-                ardDisplayRetreat = wasDouble ? Math.max(ardDisplayRetreat, 1) : 2;
+                // Seen from a Mac whose display had gone from under the
+                // session: no display reported, no picture, no word.
+                ardDisplayRetreat = 2;
                 Log.Warn('ARD: no display reported after asking for ' + mode.pixelWidth + 'x' + mode.pixelHeight +
                          ' pixels as ' + mode.width + 'x' + mode.height + ' points');
-                ardNotice(ardDisplayRetreat === 1
-                    ? 'The Mac did not make a display of that size at high resolution. Trying standard resolution.'
-                    : 'The Mac did not make a display of that size. Using its own.', 'warn', 8000);
-                ardReconnectOnPurpose('Reconnecting…');
+                ardNotice('The Mac did not make a display of that size and is sending no picture. ' +
+                          'Disconnect and connect again; the size will not be asked for.', 'warn', 0);
+                // No reconnect from here: connecting again at once is what
+                // a Mac in this state has not recovered from.
             },
         });
         new ResizeObserver(() => ardDisplayFollower.resized())
