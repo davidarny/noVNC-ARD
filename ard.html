@@ -278,9 +278,11 @@
             const choice = ardSessionChoice;
             const wantHp = !!choice && choice.display === 'virtual' && choice.quality === 'highperf';
             const hp = wantHp && ardHpUnusableReason() === null;
-            // The same choice answers the Mac's own question when someone
-            // else is using its display, unless the URL decides that.
-            rfb._ardVirtualLogin = (choice && isNaN(virtualLoginParam))
+            // The same choice answers the Mac's own question about which
+            // session to open, unless the URL decides that. Not while the
+            // dialog is still to come: an earlier choice must not answer
+            // for the one about to be made.
+            rfb._ardVirtualLogin = (choice && !ardAskOnThisConnect && isNaN(virtualLoginParam))
                 ? (choice.display === 'virtual' ? 2 : 0) : ardVirtualLogin;
             rfb._ardQualityPreset = hp ? 'highperf'
                 : (ardInitialQuality === 'highperf' ? 'adaptive' : ardInitialQuality);
@@ -421,8 +423,10 @@
         // 'choice' — our own pause after sign-in
         function ardOnSessionQuestion(ctx) {
             // Nothing to ask on a reconnect or when the URL has decided,
-            // unless the Mac wants an answer nobody has given yet.
-            if (!ardAskOnThisConnect && (ctx.mode === 'choice' || ardSessionChoice)) {
+            // unless someone is using the Mac's display and nobody has
+            // said yet what to do about that.
+            if (!ardAskOnThisConnect &&
+                (ctx.mode === 'choice' || ardSessionChoice || !ctx.username)) {
                 ardAnswerSession(ctx);
                 return;
             }

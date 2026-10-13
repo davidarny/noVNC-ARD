@@ -34,6 +34,7 @@ import ArdThousandsDecoder from './decoders/zlib-thousands.js';
 import ArdMVSDecoder from './decoders/mvs.js';
 import { parseDisplayInfo2, setDisplayBytes, displayRole,
          reconcileSelection } from './display-info.js';
+import { sessionCommand, sessionSelectAction } from './session-select.js';
 import { HpSession } from './hp/session.js';
 import { VideoSink } from './hp/video-sink.js';
 import { buildVirtualDisplayMessage } from './hp/virtual-display.js';
@@ -80,9 +81,7 @@ import {
     stateWake,
     stateCursorHidden,
     stateCursorVisible,
-    sessionCmdRequestConsole,
     sessionCmdConnectToConsole,
-    sessionCmdConnectToVirtualDisplay,
     sessionStatusGranted,
     sessionStatusPending,
     sessionStatusPendingAlt,
@@ -786,36 +785,32 @@ RFB.prototype._ardSessionSelect = function () {
                      ", user=" + user);
 
             this._ardSessionSelectConsoleUser = user;
+            this._ardSessionAllowedCmds = allowedCmds;
 
             // virtualLogin: 0=always share display, 1=show picker, 2=always virtual
             const vl = this._ardVirtualLogin;
+            const action = sessionSelectAction({
+                virtualLogin: vl,
+                consoleUser: user,
+                allowedCmds,
+                pageAsks: !!this._ardAskSessionChoice && !this._ardSessionChoiceMade,
+            });
 
-            if (vl === 0 || vl === 2) {
-                // Auto-select based on setting
-                const cmd = (vl === 2)
-                    ? sessionCmdConnectToVirtualDisplay
-                    : sessionCmdConnectToConsole;
-                this._ardSessionType = cmd;
-                RFB.messages.ardSessionCommand(this._sock, cmd, user);
-                Log.Info("ARD: SessionSelect — auto-sent command " + cmd +
+            if (action.ask) {
+                // Someone is using the display, or the page has its own
+                // question to put: the UI says which session type to use
+                this.dispatchEvent(new CustomEvent('ardsessionselect', {
+                    detail: { username: user, allowedCommands: allowedCmds, hasConsoleUser: !!user }
+                }));
+                Log.Info("ARD: SessionSelect — dispatched ardsessionselect event" +
+                         (user ? " for user " + user : " (no console user)"));
+                this._ardSessionSelectStage = 'waitingForUI';
+            } else {
+                this._ardSessionType = action.command;
+                RFB.messages.ardSessionCommand(this._sock, action.command, user);
+                Log.Info("ARD: SessionSelect — auto-sent command " + action.command +
                          " (virtualLogin=" + vl + ", user=" + user + ")");
                 this._ardSessionSelectStage = 'readResult';
-            } else if (!user || user.length === 0) {
-                // No console user — auto-connect to console
-                const cmd = (allowedCmds & (1 << sessionCmdConnectToConsole))
-                    ? sessionCmdConnectToConsole
-                    : sessionCmdRequestConsole;
-                this._ardSessionType = cmd;
-                RFB.messages.ardSessionCommand(this._sock, cmd, user);
-                Log.Info("ARD: SessionSelect — auto-sent command " + cmd + " (no console user)");
-                this._ardSessionSelectStage = 'readResult';
-            } else {
-                // Console user present — ask the UI which session type to use
-                this.dispatchEvent(new CustomEvent('ardsessionselect', {
-                    detail: { username: user, allowedCommands: allowedCmds, hasConsoleUser: true }
-                }));
-                Log.Info("ARD: SessionSelect — dispatched ardsessionselect event for user " + user);
-                this._ardSessionSelectStage = 'waitingForUI';
             }
             return true;
         }
@@ -907,8 +902,12 @@ RFB.prototype.selectSessionType = function (command) {
     }
     // The page has asked the user; do not ask again once it is granted.
     this._ardSessionChoiceMade = true;
-    this._ardSessionType = command;
     const user = this._ardSessionSelectConsoleUser || '';
+    // The Mac's own display, by whichever command this server accepts
+    if (command === sessionCmdConnectToConsole) {
+        command = sessionCommand(false, user, this._ardSessionAllowedCmds);
+    }
+    this._ardSessionType = command;
     RFB.messages.ardSessionCommand(this._sock, command, user);
     Log.Info("ARD: SessionSelect — sent command " + command + " for user " + user);
     this._ardSessionSelectStage = 'readResult';
