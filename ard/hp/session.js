@@ -53,6 +53,14 @@ const MEDIA_SILENCE_MS = 3000;
 // new one to be fully drawn before showing the new stream regardless.
 const RESIZE_SHOW_MS = 2500;
 
+// When the stream glitches (a lost picture, a silence, a backlog) the viewer
+// re-offers on the live connection to restart the media instead of tearing
+// the whole session down. Only this many recoveries in this window; beyond
+// that the trouble is not passing, and it falls back to Standard.
+const RECOVERY_MAX = 3;
+const RECOVERY_WINDOW_MS = 30000;
+const RECOVERABLE = new Set(['stalled', 'media-stopped', 'overloaded']);
+
 function isRtcp(packet) {
     return packet.length > 1 && packet[1] >= 192 && packet[1] <= 223;
 }
@@ -122,6 +130,8 @@ export class HpSession {
         this._pendingSecrets = null;
         this._resizeSignalled = false;  // onResize(true) sent, onResize(false) owed
         this._resizeOldSink = null;     // kept alive until the new picture shows
+        this._recovering = false;       // the current re-offer is a recovery
+        this._recoveryAt = [];          // recent recovery times, for the cap
         this._timers = new Set();
         this._intervals = new Set();
         this._sendChain = [Promise.resolve(), Promise.resolve()];
@@ -314,9 +324,11 @@ export class HpSession {
         // session's; the old stream stays.
         if (this._reoffering && this.state === 'streaming') {
             this._swapMedia(payload).catch((e) => {
-                this._log('resize failed: ' + (e && e.message ? e.message : e));
+                const recovery = this._recovering;
+                this._log('re-offer answer failed: ' + (e && e.message ? e.message : e));
                 this._endReoffer();
                 this._resizeDone();
+                if (recovery) this._fail('bad-answer', e && e.message ? e.message : String(e));
             });
             return;
         }
@@ -339,12 +351,39 @@ export class HpSession {
             this._sendOffer(offer);
             this._timeout(ANSWER_MS, () => {
                 if (this._reoffering) {
-                    this._log('resize: no answer');
+                    const recovery = this._recovering;
+                    this._log((recovery ? 'recovery' : 'resize') + ': no answer');
                     this._endReoffer();
                     this._resizeDone();
+                    if (recovery) this._fail('media-stopped', 'recovery got no answer');
                 }
             });
-        }, (e) => { this._log('resize offer failed: ' + e.message); this._endReoffer(); this._resizeDone(); });
+        }, (e) => {
+            const recovery = this._recovering;
+            this._log('re-offer failed: ' + e.message);
+            this._endReoffer();
+            this._resizeDone();
+            if (recovery) this._fail('offer', e.message);
+        });
+    }
+
+    // A glitch while streaming: re-offer to restart the media on the open
+    // connection rather than end High Performance, up to the cap. The old
+    // picture stays, blurred, until the new stream has one.
+    _streamingFail(reason, detail) {
+        const now = this._now();
+        this._recoveryAt = this._recoveryAt.filter(t => now - t < RECOVERY_WINDOW_MS);
+        if (RECOVERABLE.has(reason) && this.state === 'streaming' && !this._reoffering &&
+            this._recoveryAt.length < RECOVERY_MAX) {
+            this._recoveryAt.push(now);
+            this._log('recovering from ' + reason + (detail ? ' (' + detail + ')' : '') +
+                      ', attempt ' + this._recoveryAt.length + ' of ' + RECOVERY_MAX);
+            this._recovering = true;
+            this._overloadedSince = null;   // give the fresh stream a clean slate
+            this.reoffer();
+            return;
+        }
+        this._fail(reason, detail);
     }
 
     // A resize re-offer is in flight: a second one must wait for it.
@@ -354,6 +393,7 @@ export class HpSession {
 
     _endReoffer() {
         this._reoffering = false;
+        this._recovering = false;
         this._pendingSecrets = null;
     }
 
@@ -450,7 +490,7 @@ export class HpSession {
             baseSsrc: answer.video.ssrc,
             stripes: answer.video.stripes,
             onPicture: p => this._onPicture(p),
-            onStall: s => this._fail('stalled', 'waiting for picture ' + s.expectedDon),
+            onStall: s => this._streamingFail('stalled', 'waiting for picture ' + s.expectedDon),
         });
         this._sink = this._createSink({
             width: answer.video.width,
@@ -584,13 +624,14 @@ export class HpSession {
 
     // End the session when the machine has been behind for too long.
     _checkLoad(now) {
+        if (this._reoffering) { this._overloadedSince = null; return; }
         const backlog = (this._sink && this._sink.backlog) || 0;
         if (backlog <= OVERLOAD_PICTURES && this._decrypting <= OVERLOAD_PACKETS) {
             this._overloadedSince = null;
         } else if (this._overloadedSince === null) {
             this._overloadedSince = now;
         } else if (now - this._overloadedSince >= OVERLOAD_MS) {
-            this._fail('overloaded', backlog + ' pictures and ' + this._decrypting + ' packets behind');
+            this._streamingFail('overloaded', backlog + ' pictures and ' + this._decrypting + ' packets behind');
         }
     }
 
@@ -603,7 +644,7 @@ export class HpSession {
         // away, so the silence watchdog pauses until the new stream is in.
         if (this.state === 'streaming' && !this._reoffering && this._lastMediaAt !== null &&
             now - this._lastMediaAt > MEDIA_SILENCE_MS) {
-            this._fail('media-stopped');
+            this._streamingFail('media-stopped');
         }
         if (!this._feedback.rateControl || this.state === 'failed') return;
         const sinceLast = this._lastVideoPacketAt === null ? 0 : now - this._lastVideoPacketAt;

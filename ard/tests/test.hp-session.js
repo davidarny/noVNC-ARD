@@ -599,7 +599,7 @@ describe('High Performance session', () => {
         strictEqual(session.failure, 'decoder: boom');
     });
 
-    it('fails when a picture never arrives', async () => {
+    it('recovers from a stall by re-offering, and falls back only if that brings nothing', async () => {
         const keys = await negotiate();
         const videoIn = await createContext(keys.video.fromServer.key, keys.video.fromServer.salt);
         ws.deliver(CHANNEL_VIDEO, await videoIn.protectRtp(keyPicturePacket({ stripe: 0, seq: 1, don: 10, frame: 1 })));
@@ -607,11 +607,14 @@ describe('High Performance session', () => {
         ws.deliver(CHANNEL_VIDEO, await videoIn.protectRtp(keyPicturePacket({ stripe: 2, seq: 9, don: 12, frame: 1 })));
         await until(() => session.stats.videoPackets === 2, 'both packets');
         sinks[0].opts.onFirstFrame();
-        for (let i = 0; i < 8 && session.state !== 'failed'; i++) {
-            mock.timers.tick(50);
-            await settle(2);
-        }
-        strictEqual(states[states.length - 1], 'failed:stalled');
+        // The stall fires: it re-offers instead of ending, still streaming.
+        for (let i = 0; i < 8 && offers.length < 2; i++) { mock.timers.tick(50); await settle(2); }
+        strictEqual(offers.length, 2, 'the recovery re-offer');
+        strictEqual(session.state, 'streaming');
+        // The recovery gets no answer: now it falls back.
+        mock.timers.tick(5000);
+        await settle();
+        strictEqual(session.state, 'failed');
     });
 
     // Let time pass as it does, one timer period at a time.
@@ -619,7 +622,7 @@ describe('High Performance session', () => {
         for (let t = 0; t < ms; t += 50) mock.timers.tick(50);
     }
 
-    it('fails when the decoder stays behind, and not when it catches up', async () => {
+    it('does not fail for a backlog that clears, and recovers one that does not', async () => {
         await negotiate();
         sinks[0].opts.onFirstFrame();
 
@@ -632,11 +635,16 @@ describe('High Performance session', () => {
         sinks[0].backlog = 500;
         pass(1900);
         strictEqual(session.state, 'streaming');
+        strictEqual(offers.length, 1);
 
-        // Behind and staying there.
+        // Behind and staying there: it re-offers to recover, still streaming.
         pass(200);
-        strictEqual(states[states.length - 1], 'failed:overloaded');
-        ok(sinks[0].closed);
+        await settle();
+        strictEqual(offers.length, 2, 'the recovery re-offer');
+        strictEqual(session.state, 'streaming');
+        // No answer to the recovery: falls back.
+        pass(5000);
+        strictEqual(session.state, 'failed');
     });
 
     it('fails when the server stops sending, and not while sound still arrives', async () => {
@@ -652,10 +660,14 @@ describe('High Performance session', () => {
             strictEqual(session.state, 'streaming');
         }
 
-        // Then nothing at all.
+        // Then nothing at all: it re-offers to recover, still streaming.
         pass(600);
-        strictEqual(states[states.length - 1], 'failed:media-stopped');
-        ok(sinks[0].closed);
+        await settle();
+        strictEqual(offers.length, 2, 'the recovery re-offer');
+        strictEqual(session.state, 'streaming');
+        // No answer to the recovery: falls back.
+        pass(5000);
+        strictEqual(session.state, 'failed');
     });
 
     it('leaves a start without any packet to the first-picture limit', async () => {
@@ -839,6 +851,38 @@ describe('High Performance session', () => {
         mock.timers.tick(4000);
         strictEqual(session.state, 'streaming');
         strictEqual(session.reoffering(), true);
+    });
+
+    it('keeps streaming when a recovery re-offer is answered', async () => {
+        await stream();
+        session._streamingFail('media-stopped');
+        await until(() => offers.length === 2, 'the recovery re-offer');
+        strictEqual(session.state, 'streaming');
+        session.handleAnswer(await answerWith({
+            audioSsrc: 0x1111, videoSsrc: 0x2222, width: 1920, height: 1080, stripes: 4 }));
+        await until(() => sinks.length === 2, 'the new sink');
+        sinks[1].opts.onFirstPicture();
+        strictEqual(session.state, 'streaming');
+        ok(!sinks[1].closed);
+    });
+
+    it('falls back after too many recoveries in the window', async () => {
+        await stream();
+        for (let i = 0; i < 3; i++) {
+            const before = offers.length;
+            session._streamingFail('media-stopped');
+            await until(() => offers.length === before + 1, 'a recovery re-offer');
+            strictEqual(session.state, 'streaming');
+            session.handleAnswer(await answerWith({
+                audioSsrc: 0x1000 + i, videoSsrc: 0x2000 + i, width: 1920, height: 1080, stripes: 4 }));
+            await until(() => sinks.length === 2 + i, 'the new sink');
+            sinks[sinks.length - 1].opts.onFirstPicture();
+            strictEqual(session.state, 'streaming');
+        }
+        // The fourth glitch in the window is past the cap.
+        session._streamingFail('media-stopped');
+        await until(() => session.state === 'failed', 'the fall back');
+        strictEqual(session.failure.startsWith('media-stopped'), true);
     });
 
     it('does not re-offer unless it is streaming', async () => {
