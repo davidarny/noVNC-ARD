@@ -43,6 +43,7 @@
         import { encodingArdHalftone, encodingArdGray16, encodingArdThousands } from './ard/ard-constants.js';
         import { displayMenuEntries } from './ard/display-info.js';
         import { VideoSink } from './ard/hp/video-sink.js';
+        import { MEDIA_SUBPROTOCOL } from './ard/hp/session.js';
 
         let response;
 
@@ -232,6 +233,7 @@
         let ardAskOnThisConnect = false;            // show the dialog once signed in
         let ardPendingQuestion = null;              // what the open dialog is answering
         let ardMediaOk = null;                      // does the relay have a media channel: null = not known
+        let ardMediaBusy = false;                   // is another viewer using it
         let ardAudioMuted = false;
         let ardHpInfoTimer = null;
 
@@ -250,6 +252,7 @@
             if (ardHpMediaUrl() === null || ardMediaOk === false) {
                 return 'this connection has no media channel';
             }
+            if (ardMediaBusy) return 'another viewer is using it on this relay';
             if (ardHpDisabled) return 'it failed on the last attempt';
             return null;
         }
@@ -368,33 +371,47 @@
 
         // ----- the dialog, shown once signed in -----
 
-        // Is there a relay with a media endpoint behind this connection?
-        // A plain TCP proxy accepts the WebSocket but not the subprotocol.
+        // Is there a relay with a media endpoint behind this connection,
+        // and is it free? A plain TCP proxy accepts the WebSocket but not
+        // the subprotocol. The relay has one media channel, which goes to
+        // whoever connects to it last, so this only asks (?probe): the
+        // relay answers in its close reason and attaches nothing.
         function ardProbeMedia() {
             const url = ardHpMediaUrl();
             ardMediaOk = null;
+            ardMediaBusy = false;
             if (url === null) {
                 ardMediaOk = false;
                 return Promise.resolve(false);
             }
             return new Promise((resolve) => {
-                let ws, done = false;
-                const finish = (ok) => {
+                let ws, opened = false, done = false;
+                const finish = (ok, busy = false) => {
                     if (done) return;
                     done = true;
                     ardMediaOk = ok;
+                    ardMediaBusy = ok && busy;
                     try { ws.close(); } catch (e) { /* never opened */ }
                     resolve(ok);
                 };
                 try {
-                    ws = new WebSocket(url, 'ard-media');
+                    ws = new WebSocket(url + '?probe', MEDIA_SUBPROTOCOL);
                 } catch (e) {
                     finish(false);
                     return;
                 }
-                ws.onopen = () => finish(ws.protocol === 'ard-media');
+                ws.onopen = () => {
+                    if (ws.protocol !== MEDIA_SUBPROTOCOL) {
+                        finish(false);
+                        return;
+                    }
+                    opened = true;
+                    // A relay that does not know the question keeps the
+                    // socket open: it has the endpoint, more is not known.
+                    setTimeout(() => finish(true), 1000);
+                };
                 ws.onerror = () => finish(false);
-                ws.onclose = () => finish(false);
+                ws.onclose = e => finish(opened, e.reason === 'busy');
                 setTimeout(() => finish(false), 3000);
             });
         }
