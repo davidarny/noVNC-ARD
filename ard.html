@@ -225,33 +225,57 @@
         // the window asks the Mac for a display of the new size, on the open
         // connection, without reconnecting.
         const ardFollowsWindow = /^window(@[12])?$/i.test(ardHpResolution || '');
-        const ARD_FOLLOW_DEBOUNCE_MS = 800;
-        const ARD_FOLLOW_MIN_CHANGE = 24;   // points; ignore smaller jitters
+        const ARD_FOLLOW_DEBOUNCE_MS = 350;   // after the drag stops
+        const ARD_FOLLOW_MIN_CHANGE = 24;     // points; ignore smaller jitters
         let ardFollowTimer = null;
-        let ardFollowLast = null;           // { width, height } last asked for
+        let ardFollowLast = null;             // { width, height } last asked for
+        let ardFollowBlurred = false;         // the drag softened the picture
+
+        function ardFollowClearBlur() {
+            if (ardFollowBlurred && UI.rfb && UI.rfb._ardHpResizeVisual) {
+                UI.rfb._ardHpResizeVisual(false);
+            }
+            ardFollowBlurred = false;
+        }
 
         function ardFollowStop() {
             if (ardFollowTimer) { clearTimeout(ardFollowTimer); ardFollowTimer = null; }
+            ardFollowClearBlur();
             ardFollowLast = null;
         }
 
+        // The drag has stopped: ask for the new size, or, if it did not
+        // really change, just take the softening back off.
         function ardFollowResize() {
             const rfb = UI.rfb;
-            if (!ardFollowsWindow || !rfb || !rfb.ardHighPerformanceActive) return;
+            if (!ardFollowsWindow || !rfb || !rfb.ardHighPerformanceActive) { ardFollowClearBlur(); return; }
             const display = ardHpDisplay();
-            if (!display) return;
+            if (!display) { ardFollowClearBlur(); return; }
             if (ardFollowLast &&
                 Math.abs(display.width - ardFollowLast.width) < ARD_FOLLOW_MIN_CHANGE &&
                 Math.abs(display.height - ardFollowLast.height) < ARD_FOLLOW_MIN_CHANGE) {
+                ardFollowClearBlur();
                 return;
             }
             if (rfb._ardHpResize(display)) {
                 ardFollowLast = { width: display.width, height: display.height };
+                // The session now owns the softening and clears it when the
+                // new picture arrives.
+                ardFollowBlurred = false;
+            } else {
+                ardFollowClearBlur();
             }
         }
 
         function ardFollowSchedule() {
             if (!ardFollowsWindow) return;
+            const rfb = UI.rfb;
+            // Soften the picture as the drag begins; the resize itself waits
+            // until the drag stops (the debounce below).
+            if (rfb && rfb.ardHighPerformanceActive && !ardFollowBlurred && rfb._ardHpResizeVisual) {
+                rfb._ardHpResizeVisual(true);
+                ardFollowBlurred = true;
+            }
             if (ardFollowTimer) clearTimeout(ardFollowTimer);
             ardFollowTimer = setTimeout(() => { ardFollowTimer = null; ardFollowResize(); },
                                         ARD_FOLLOW_DEBOUNCE_MS);
