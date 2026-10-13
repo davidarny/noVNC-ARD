@@ -56,7 +56,7 @@ open http://localhost:6088/ard.html
 | `ardSessionType` | string | ask | Skips the session dialog: `share` (the Mac's own displays), `virtual` (virtual login, standard quality) or `highperf` (virtual display in High Performance) |
 | `ardMediaPath` | string | `media` | Path of the relay's media WebSocket, used by `highperf` |
 | `ardHpVirtualDisplay` | boolean | `true` | In `highperf`, ask the Mac for a virtual display at 3840×2160. `false` shows its real displays |
-| `ardHpResolution` | string | `1920x1080` | In `highperf`, the size of the virtual display to ask for, in points: `1600x900` (drawn at 2 pixels to the point), `2560x1440@1` (with the scale, 1 or 2), or `window` for the size of the browser window. The picture is kept within 3840×2160 pixels. **Untried against the Macs this viewer asks**: what an Apple silicon Mac does with a size other than the default is not known |
+| `ardHpResolution` | string | `1920x1080` | The size of the virtual display to ask for, in `highperf` and, as an experiment, in a Standard virtual display login (where no viewer is known to ask, and nothing is asked without this parameter). In points: `1600x900` (drawn at 2 pixels to the point), `2560x1440@1` (with the scale, 1 or 2), or `window` for the size of the browser window. The picture is kept within 3840×2160 pixels. **Untried against the Macs this viewer asks**: what an Apple silicon Mac does with a size other than the default is not known |
 | `ardHpAudio` | boolean | `true` | In `highperf`, play the Mac's sound |
 | `ardHpFeedback` | string | all | Which RTCP the viewer sends in `highperf`: a comma list of `rr`, `ack`, `rctl`. For protocol testing |
 | `ardEncryption` | integer | `2` | Encryption mode: `1` = keystroke-only, `2` = full tunnel |

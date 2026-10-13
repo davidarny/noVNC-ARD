@@ -83,6 +83,7 @@ import {
     stateCursorHidden,
     stateCursorVisible,
     sessionCmdConnectToConsole,
+    sessionCmdConnectToVirtualDisplay,
     sessionStatusGranted,
     sessionStatusPending,
     sessionStatusPendingAlt,
@@ -1565,15 +1566,24 @@ RFB.prototype._ardHpOffered = function () {
 // the request goes only to a server whose ServerInit is that of the Macs
 // seen to send the mode (_ardHpOffered). The page does not try again on a
 // connection that ends early.
+//
+// A virtual display login in Standard quality sends the request too when a
+// size has been asked for (ardHpResolution). No viewer is known to send it
+// outside High Performance, so what a Mac makes of it there is an open
+// question: this is the means of finding out.
 RFB.prototype._ardHpRequestVirtualDisplay = function () {
-    if (!this._ardHpWanted() || this._ardHpVirtualDisplay === false) return;
+    const highPerf = this._ardHpWanted() && this._ardHpVirtualDisplay !== false;
+    const sizedStandard = !highPerf && !!this._ardHpDisplay &&
+                          this._ardSessionType === sessionCmdConnectToVirtualDisplay;
+    if (!highPerf && !sizedStandard) return;
     // _ardHpDisplay: { width, height, scale } to ask for a display of that
     // size; without it, the display Apple's viewer asks for
     const display = this._ardHpDisplay ? virtualDisplayFor(this._ardHpDisplay) : null;
     if (display) {
         const m = display.modes[0];
-        Log.Info("ARD HP: asking for a display of " + m.width + "x" + m.height +
-                 " points, " + m.pixelWidth + "x" + m.pixelHeight + " pixels");
+        Log.Info("ARD: asking for a virtual display of " + m.width + "x" + m.height +
+                 " points, " + m.pixelWidth + "x" + m.pixelHeight + " pixels" +
+                 (sizedStandard ? " (Standard quality, experimental)" : ""));
     }
     RFB.messages.ardVirtualDisplay(this._sock, buildVirtualDisplayMessage(display ? [display] : undefined));
 };
