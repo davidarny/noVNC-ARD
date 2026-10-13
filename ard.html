@@ -225,7 +225,11 @@
         // the window asks the Mac for a display of the new size, on the open
         // connection, without reconnecting.
         const ardFollowsWindow = /^window(@[12])?$/i.test(ardHpResolution || '');
-        const ARD_FOLLOW_DEBOUNCE_MS = 350;   // after the drag stops
+        // A web page cannot see the mouse button of an OS window resize: the
+        // drag is on the window frame, not the document, so there is no
+        // release event to wait for. We commit once the size has been still
+        // this long, and sooner if a pointer release does reach the page.
+        const ARD_FOLLOW_DEBOUNCE_MS = 900;   // after the size stops changing
         const ARD_FOLLOW_MIN_CHANGE = 24;     // points; ignore smaller jitters
         let ardFollowTimer = null;
         let ardFollowLast = null;             // { width, height } last asked for
@@ -285,6 +289,17 @@
             const box = document.getElementById('noVNC_container');
             if (box) new ResizeObserver(() => ardFollowSchedule()).observe(box);
             window.addEventListener('resize', ardFollowSchedule);
+            // If the release lands in the page, commit the new size at once
+            // instead of waiting out the settle.
+            const commitNow = () => {
+                if (ardFollowBlurred && ardFollowTimer) {
+                    clearTimeout(ardFollowTimer);
+                    ardFollowTimer = null;
+                    ardFollowResize();
+                }
+            };
+            window.addEventListener('pointerup', commitNow, true);
+            window.addEventListener('mouseup', commitNow, true);
         }
 
         // ardHpAudio: false leaves the Mac's sound unplayed
