@@ -172,10 +172,13 @@ The display is sized when the session is set up. **Resizing the window afterward
 What to know:
 
 - `window` asks for one pixel to the point. `window@2` asks for two (HiDPI).
-- **The Mac makes a display to order only when it has none.** If one is left over from an earlier session, the new session is attached to it at the size it has, whatever was asked. How long a Mac keeps a display after its last viewer has left is not known, and it varied.
+- **A display can be given another size on a later connection, never one beyond the size it was made with.** The Mac keeps the display it made and changes its size when the next session asks for another: applied exactly 7 times in 7, with as little as 2 seconds between sessions, whenever the new size was no wider and no taller in pixels than the largest size stated when the display was made. Beyond that, never as asked, 7 times in 7: three times the Mac gave fewer pixels than asked (the size in points, at one pixel to the point, or half the points at two), four times it kept the old size and sent no picture at all.
+- The viewer therefore asks for every display with room for 3840×2160 pixels, whatever size it wants first. **This remedy has not yet been tried against a Mac.** A display made small by an earlier version of this viewer stays small until the Mac drops it.
+- The Mac drops the display when a High Performance session ends, and otherwise when its Screen Sharing service stops, which it does 15 seconds after the last viewer has left.
 - Sessions of the same user share one virtual display.
-- Do not try to change the size by reconnecting quickly. That was tried: the Mac kept the old size, then lost the display and sent no picture to any viewer until Screen Sharing was restarted on it (`sudo launchctl kickstart -k system/com.apple.screensharing`).
-- Tried against one Apple silicon Mac (macOS 27), from one browser, in one night.
+- After a session on a virtual display is lost, the viewer waits 6 seconds before connecting again. A Mac needs over a second to take such a session down, and longer after a logout; a request for a virtual display that arrived 1.2 seconds after a logout was followed by the Mac's window server crashing (macOS 27.0.1, once).
+- A Mac that sends no picture to any viewer needs Screen Sharing restarted on it (`sudo launchctl kickstart -k system/com.apple.screensharing`).
+- Tried against one Apple silicon Mac (macOS 27), from one browser, over two days.
 
 ### Sound and the bundled decoder
 
