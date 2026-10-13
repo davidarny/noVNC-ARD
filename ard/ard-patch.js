@@ -1595,7 +1595,10 @@ RFB.prototype._ardHpStart = function () {
         feedback: this._ardHpFeedback,
         endpoint: this._ardHpEndpoint,
         sendOffer: bytes => RFB.messages.ardMediaStreamNegotiation(this._sock, bytes),
-        createSink: opts => new VideoSink(Object.assign({ target: this._canvas }, opts)),
+        createSink: opts => new VideoSink(Object.assign({
+            target: this._canvas,
+            view: () => this._ardHpView(),
+        }, opts)),
         audioMuted: !!this._ardAudioMuted,
         // Loaded only when wanted: it brings a WebAssembly decoder with it.
         createAudio: this._ardHpAudio === false ? null
@@ -1604,6 +1607,14 @@ RFB.prototype._ardHpStart = function () {
         log: msg => Log.Info("ARD HP: " + msg),
     });
     this._ardHp.start();
+};
+
+// The part of the framebuffer noVNC's canvas shows, which is not all of it
+// when the view is clipped to the window.
+RFB.prototype._ardHpView = function () {
+    const display = this._display;
+    const vp = display._viewportLoc;
+    return { x: vp.x, y: vp.y, w: vp.w, h: vp.h, fbWidth: display.width, fbHeight: display.height };
 };
 
 RFB.prototype._ardHpOnState = function (state, reason) {

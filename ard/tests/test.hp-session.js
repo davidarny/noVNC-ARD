@@ -18,6 +18,7 @@ import { splitKeyBlock } from '../hp/negotiation.js';
 import { pictureAck } from '../hp/feedback.js';
 import { HpSession, CHANNEL_AUDIO, CHANNEL_VIDEO } from '../hp/session.js';
 import { codecFromAnnexB, splitAnnexB, DEFAULT_CODEC } from '../hp/hevc.js';
+import { overlayGeometry } from '../hp/video-sink.js';
 
 const SERVER_AUDIO_SSRC = 0x579aea87;
 const SERVER_VIDEO_SSRC = 0x12671595;
@@ -156,6 +157,56 @@ describe('HEVC helpers', () => {
     it('splits Annex B on three- and four-byte start codes', () => {
         const nals = splitAnnexB(new Uint8Array([0, 0, 0, 1, 9, 8, 0, 0, 1, 7, 0, 0, 0, 1, 6, 5, 4]));
         deepStrictEqual(nals.map(n => Array.from(n)), [[9, 8], [7], [6, 5, 4]]);
+    });
+});
+
+describe('Overlay geometry', () => {
+    const none = { top: 0, right: 0, bottom: 0, left: 0 };
+    const box = { left: 10, top: 20, width: 960, height: 540 };
+
+    it('covers the canvas when the canvas shows the whole framebuffer', () => {
+        const view = { x: 0, y: 0, w: 1920, h: 1080, fbWidth: 1920, fbHeight: 1080 };
+        deepStrictEqual(overlayGeometry(box, view),
+                        { left: 10, top: 20, width: 960, height: 540, clip: none });
+    });
+
+    it('covers the canvas when nothing is known about the view', () => {
+        const covering = { left: 10, top: 20, width: 960, height: 540, clip: none };
+        deepStrictEqual(overlayGeometry(box, null), covering);
+        deepStrictEqual(overlayGeometry(box, { x: 0, y: 0, w: 0, h: 0, fbWidth: 0, fbHeight: 0 }), covering);
+    });
+
+    it('shows the part a clipped canvas shows, at the scale it shows it', () => {
+        // An unscaled 960x540 window onto the middle of a 1920x1080 framebuffer.
+        const view = { x: 400, y: 300, w: 960, h: 540, fbWidth: 1920, fbHeight: 1080 };
+        const g = overlayGeometry(box, view);
+        deepStrictEqual(g, {
+            left: 10 - 400, top: 20 - 300, width: 1920, height: 1080,
+            clip: { top: 300, right: 1920 - 1360, bottom: 1080 - 840, left: 400 },
+        });
+        // Framebuffer point (400, 300) is at the canvas's top left corner,
+        // and the visible part is exactly the canvas.
+        strictEqual(g.left + g.clip.left, box.left);
+        strictEqual(g.top + g.clip.top, box.top);
+        strictEqual(g.width - g.clip.left - g.clip.right, box.width);
+        strictEqual(g.height - g.clip.top - g.clip.bottom, box.height);
+    });
+
+    it('follows a clipped view that is also scaled', () => {
+        // The same window shown at half size.
+        const view = { x: 400, y: 300, w: 960, h: 540, fbWidth: 1920, fbHeight: 1080 };
+        const g = overlayGeometry({ left: 0, top: 0, width: 480, height: 270 }, view);
+        deepStrictEqual(g, {
+            left: -200, top: -150, width: 960, height: 540,
+            clip: { top: 150, right: 280, bottom: 120, left: 200 },
+        });
+    });
+
+    it('clips nothing past the framebuffer edge', () => {
+        const view = { x: 960, y: 540, w: 960, h: 540, fbWidth: 1920, fbHeight: 1080 };
+        const g = overlayGeometry(box, view);
+        strictEqual(g.clip.right, 0);
+        strictEqual(g.clip.bottom, 0);
     });
 });
 
