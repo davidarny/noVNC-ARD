@@ -224,7 +224,20 @@
         // browser window: while High Performance is streaming, a resize of
         // the window asks the Mac for a display of the new size, on the open
         // connection, without reconnecting.
-        const ardFollowsWindow = /^window(@[12])?$/i.test(ardHpResolution || '');
+        // Resize to window: in High Performance the Mac's display follows the
+        // browser window, sharp at any size. On by default unless the URL
+        // asked for a fixed size; the session dialog turns it on or off.
+        const ardWindowFormUrl = /^window(@[12])?$/i.test(ardHpResolution || '');
+        const ardWindowScale = /@1$/i.test(ardHpResolution || '') ? 1 : 2;
+        let ardResizeToWindow = ardWindowFormUrl || !ardHpResolution;
+
+        function ardWindowDisplay() {
+            const box = document.getElementById('noVNC_container');
+            return parseDisplayRequest('window@' + ardWindowScale, {
+                width: box ? box.clientWidth : window.innerWidth,
+                height: box ? box.clientHeight : window.innerHeight,
+            });
+        }
         // A web page cannot see the mouse button of an OS window resize: the
         // drag is on the window frame, not the document, so there is no
         // release event to wait for. We commit once the size has been still
@@ -252,8 +265,8 @@
         // really change, just take the softening back off.
         function ardFollowResize() {
             const rfb = UI.rfb;
-            if (!ardFollowsWindow || !rfb || !rfb.ardHighPerformanceActive) { ardFollowClearBlur(); return; }
-            const display = ardHpDisplay();
+            if (!ardResizeToWindow || !rfb || !rfb.ardHighPerformanceActive) { ardFollowClearBlur(); return; }
+            const display = ardWindowDisplay();
             if (!display) { ardFollowClearBlur(); return; }
             if (ardFollowLast &&
                 Math.abs(display.width - ardFollowLast.width) < ARD_FOLLOW_MIN_CHANGE &&
@@ -272,7 +285,7 @@
         }
 
         function ardFollowSchedule() {
-            if (!ardFollowsWindow) return;
+            if (!ardResizeToWindow) return;
             const rfb = UI.rfb;
             // Soften the picture as the drag begins; the resize itself waits
             // until the drag stops (the debounce below).
@@ -285,7 +298,7 @@
                                         ARD_FOLLOW_DEBOUNCE_MS);
         }
 
-        if (ardFollowsWindow && typeof ResizeObserver !== 'undefined') {
+        if (typeof ResizeObserver !== 'undefined') {
             const box = document.getElementById('noVNC_container');
             if (box) new ResizeObserver(() => ardFollowSchedule()).observe(box);
             window.addEventListener('resize', ardFollowSchedule);
@@ -411,8 +424,9 @@
             rfb._ardHpMediaUrl = hp ? ardHpMediaUrl() : null;
             rfb._ardHpFeedback = ardHpFeedback;
             rfb._ardHpVirtualDisplay = ardHpVirtualDisplay;
-            // Also for a virtual display in Standard quality, as an experiment
-            rfb._ardHpDisplay = ardHpDisplay();
+            // In High Performance with resize-to-window, the display is the
+            // browser window (and follows it); otherwise the URL size, if any.
+            rfb._ardHpDisplay = (hp && ardResizeToWindow) ? ardWindowDisplay() : ardHpDisplay();
             rfb._ardHpAudio = ardHpAudio;
             rfb.ardAudioMuted = ardAudioMuted;
             // Virtual Display in Standard quality is the ordinary virtual
@@ -426,8 +440,8 @@
                 const v = d.video;
                 ardNotice('High Performance' + (v ? ' · ' + v.width + '×' + v.height : ''), 'normal', 3000);
                 // The size now on screen is the baseline the follower measures from.
-                if (ardFollowsWindow) {
-                    const display = ardHpDisplay();
+                if (ardResizeToWindow) {
+                    const display = ardWindowDisplay();
                     ardFollowLast = display ? { width: display.width, height: display.height } : null;
                 }
                 if (ardHpAttempt) ardHpAttempt.streamingSince = performance.now();
@@ -561,6 +575,13 @@
             document.getElementById('noVNC_ard_type_hp_note').textContent = reason === null
                 ? 'Sharpest and smoothest, with sound. Needs a fast network'
                 : checking ? 'Checking the connection…' : 'Not available: ' + reason;
+            // Resize to window applies to High Performance only.
+            const hpChosen = virtual && hpInput.checked && reason === null;
+            const resizeRow = document.getElementById('noVNC_ard_type_resize_row');
+            const resizeInput = document.getElementById('noVNC_ard_type_resize');
+            resizeRow.classList.toggle('noVNC_ard_type_off', !hpChosen);
+            resizeInput.disabled = !hpChosen;
+            resizeInput.checked = ardResizeToWindow;
         }
 
         // The connection is waiting for an answer. ctx.mode says to what:
@@ -635,6 +656,7 @@
         document.getElementById('noVNC_ard_type_dlg').addEventListener('change', (e) => {
             const dlg = document.getElementById('noVNC_ard_type_dlg');
             if (e.target.name === 'ard_quality') dlg.dataset.wantHp = String(e.target.value === 'highperf');
+            if (e.target.id === 'noVNC_ard_type_resize') ardResizeToWindow = e.target.checked;
             ardSyncTypeDialog();
         });
         for (const id of ['noVNC_ard_type_cancel', 'noVNC_ard_type_disconnect']) {
@@ -651,6 +673,7 @@
                 display: dlg.querySelector('input[name="ard_display"]:checked').value,
                 quality: dlg.querySelector('input[name="ard_quality"]:checked').value,
             };
+            ardResizeToWindow = document.getElementById('noVNC_ard_type_resize').checked;
             try {
                 localStorage.setItem('ard_session_choice', JSON.stringify({
                     display: ardSessionChoice.display,
@@ -1915,6 +1938,12 @@
                 <input type="radio" name="ard_quality" value="highperf">
                 <span><strong>High Performance</strong>
                     <small id="noVNC_ard_type_hp_note"></small></span>
+            </label>
+            <label class="noVNC_ard_type_row" id="noVNC_ard_type_resize_row"
+                   style="margin-left:1.6em">
+                <input type="checkbox" id="noVNC_ard_type_resize">
+                <span><strong>Resize to window</strong>
+                    <small>The Mac's display follows this window, sharp at any size</small></span>
             </label>
             <label class="noVNC_ard_type_row">
                 <input type="radio" name="ard_quality" value="standard">
