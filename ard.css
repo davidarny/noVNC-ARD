@@ -114,6 +114,32 @@
     box-sizing: border-box;
 }
 
+/* Display selector (ARD, more than one display) */
+#noVNC_display_list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: 8px;
+}
+.noVNC_display_option {
+    background: none;
+    border: none;
+    border-radius: 6px;
+    padding: 6px 10px;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    white-space: nowrap;
+    cursor: pointer;
+}
+.noVNC_display_option:hover {
+    background-color: rgba(128, 128, 128, 0.25);
+}
+.noVNC_display_option.noVNC_selected {
+    background-color: var(--novnc-blue);
+    color: white;
+}
+
 /* Quality selector (ARD quality presets) */
 #noVNC_quality_button.noVNC_hidden {
     display: none !important;

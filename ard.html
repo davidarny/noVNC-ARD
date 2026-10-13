@@ -41,6 +41,7 @@
         import UI from "./noVNC/app/ui.js";
         import * as Log from './noVNC/core/util/logging.js';
         import { encodingArdHalftone, encodingArdGray16, encodingArdThousands } from './ard/ard-constants.js';
+        import { displayMenuEntries } from './ard/display-info.js';
 
         let response;
 
@@ -481,6 +482,54 @@
                 }
             });
 
+        // Display selector — button toggles panel, entries switch display
+        function ardCloseDisplayPanel() {
+            document.getElementById('noVNC_display_panel').classList.remove('noVNC_open');
+            document.getElementById('noVNC_display_button').classList.remove('noVNC_selected');
+        }
+
+        // Rebuild the menu from the server's display list. The button only
+        // shows when there is more than one display to choose from.
+        function ardUpdateDisplayMenu() {
+            const rfb = UI.rfb;
+            const entries = (showArdDisplaySelect && rfb && rfb._rfbAppleARD)
+                ? displayMenuEntries(rfb._ardDisplays) : [];
+            document.getElementById('noVNC_display_button')
+                .classList.toggle('noVNC_hidden', entries.length === 0);
+            if (entries.length === 0) {
+                ardCloseDisplayPanel();
+            }
+            document.getElementById('noVNC_display_list').replaceChildren(
+                ...entries.map((entry) => {
+                    const option = document.createElement('button');
+                    option.type = 'button';
+                    option.className = 'noVNC_display_option';
+                    option.classList.toggle('noVNC_selected',
+                                            entry.id === rfb.ardSelectedDisplay);
+                    option.textContent = entry.label;
+                    option.addEventListener('click', () => {
+                        if (!UI.rfb) return;
+                        UI.rfb.ardSelectedDisplay = entry.id;
+                        ardUpdateDisplayMenu();
+                        ardCloseDisplayPanel();
+                        UI.rfb.focus();
+                    });
+                    return option;
+                }));
+        }
+
+        document.getElementById('noVNC_display_button')
+            .addEventListener('click', () => {
+                const panel = document.getElementById('noVNC_display_panel');
+                if (panel.classList.contains('noVNC_open')) {
+                    ardCloseDisplayPanel();
+                } else {
+                    panel.classList.add('noVNC_open');
+                    document.getElementById('noVNC_display_button')
+                        .classList.add('noVNC_selected');
+                }
+            });
+
         // Quality selector — button toggles panel, track handles drag
         document.getElementById('noVNC_quality_button')
             .addEventListener('click', () => {
@@ -676,7 +725,9 @@
                 UI.rfb._ardVirtualLogin = ardVirtualLogin;
                 UI.rfb._ardQualityPreset = ardInitialQuality;
                 UI.rfb._ardControlMode = ardInitialControlMode;
-                UI.rfb._ardAutoSelectDisplay = ardAutoSelectDisplay;
+                // Without the selector there would be no way back to
+                // the other displays, so stay on all of them
+                UI.rfb._ardAutoSelectDisplay = ardAutoSelectDisplay && showArdDisplaySelect;
 
                 // Session select event listener
                 UI.rfb.addEventListener('ardsessionselect', (e) => {
@@ -706,6 +757,9 @@
 
                 // Curtain state changes
                 UI.rfb.addEventListener('ardcurtainchange', ardUpdateCurtainButton);
+
+                // Display list arrived or changed
+                UI.rfb.addEventListener('arddisplayinfo', ardUpdateDisplayMenu);
 
                 // Update status bar when full encryption activates
                 UI.rfb.addEventListener('ardencryptionstate', () => {
@@ -783,6 +837,7 @@
             document.getElementById('noVNC_quality_panel').classList.remove('noVNC_open');
             document.getElementById('noVNC_quality_button').classList.remove('noVNC_selected');
             ardCloseCurtainPanel();
+            ardCloseDisplayPanel();
             _origCloseControlbar.call(UI);
         };
 
@@ -802,6 +857,7 @@
                 }
                 ardSyncQualityStops();
                 ardUpdateCurtainButton();
+                ardUpdateDisplayMenu();
             }
         };
 
@@ -838,6 +894,9 @@
             document.getElementById('noVNC_curtain_button').classList.add('noVNC_hidden');
             document.getElementById('noVNC_curtain_button').disabled = true;
             ardCloseCurtainPanel();
+            document.getElementById('noVNC_display_button').classList.add('noVNC_hidden');
+            document.getElementById('noVNC_display_list').replaceChildren();
+            ardCloseDisplayPanel();
             const wasConnected = UI.connected;
             const isARD = wasConnected && ardReconnectCredentials !== null;
 
@@ -1056,6 +1115,22 @@
                     <img src="ard/images/quality-low.svg" alt="Low"
                         class="noVNC_quality_icon">
                 </div>
+            </div>
+            </div>
+
+            <!-- ARD display selector -->
+            <button id="noVNC_display_button" class="noVNC_button noVNC_icon_btn noVNC_hidden"
+                    title="Displays">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/>
+                </svg>
+            </button>
+            <div class="noVNC_vcenter">
+            <div id="noVNC_display_panel" class="noVNC_panel">
+                <div class="noVNC_heading">
+                    <svg class="noVNC_heading_icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></svg>Displays
+                </div>
+                <div id="noVNC_display_list"></div>
             </div>
             </div>
 

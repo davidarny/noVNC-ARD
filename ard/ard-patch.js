@@ -32,6 +32,8 @@ import ArdHalftoneDecoder from './decoders/zlib-halftone.js';
 import ArdGray16Decoder from './decoders/zlib-16gray.js';
 import ArdThousandsDecoder from './decoders/zlib-thousands.js';
 import ArdMVSDecoder from './decoders/mvs.js';
+import { parseDisplayInfo2, setDisplayBytes, displayRole,
+         reconcileSelection } from './display-info.js';
 
 import {
     encodingArdHalftone,
@@ -147,6 +149,19 @@ RFB.prototype._negotiateProtocolVersion = function () {
 
             // Display/User info
             this._ardDisplays = [];
+            // Set once a DisplayInfo2 has supplied the display list, which
+            // then takes precedence over the plainer DisplayInfo
+            this._ardDisplayInfo2Seen = false;
+            // Display being viewed: a display id, or null for all combined.
+            // Its role is what identifies it when the ids change.
+            this._ardSelectedDisplay = null;
+            this._ardSelectedRole = null;
+            // With several displays, start on the main one instead of on
+            // all of them combined. Decided once, when the list arrives.
+            this._ardAutoSelectDisplay = this._ardAutoSelectDisplay ?? true;
+            this._ardDisplayAutoSelected = false;
+            // Display id the server last said it is sending
+            this._ardShownDisplay = null;
             this._ardRemoteUser = '';
             this._ardUserAvatarPng = null;
             this._ardDeviceInfo = null;
@@ -358,7 +373,7 @@ RFB.prototype._negotiateServerInit = function () {
     // → SetEncryption → FBUpdateRequest
     RFB.messages.ardViewerInfo(this._sock);
     RFB.messages.ardSetMode(this._sock, this._ardControlMode || 1);
-    RFB.messages.ardSetDisplay(this._sock);
+    RFB.messages.ardSetDisplay(this._sock, this._ardSelectedDisplay);
     RFB.messages.ardAutoPasteboard(this._sock, 1);
     this._sendEncodings();
     RFB.messages.pixelFormat(this._sock, this._fbDepth, true);
@@ -695,7 +710,9 @@ RFB.prototype._ardHandleDisplayInfo2Msg = function () {
     Log.Info("ARD: DisplayInfo2 message — size=" + payloadSize +
              ", payload: " + hexHead);
 
+    const info = parseDisplayInfo2(data);
     this._sock.rQskipBytes(2 + payloadSize);
+    this._ardApplyDisplayInfo2(info, 0, 0);
     return true;
 };
 
@@ -831,7 +848,7 @@ RFB.prototype._ardPostSessionInit = function () {
     // Same init order as normal path
     RFB.messages.ardViewerInfo(this._sock);
     RFB.messages.ardSetMode(this._sock, this._ardControlMode || 1);
-    RFB.messages.ardSetDisplay(this._sock);
+    RFB.messages.ardSetDisplay(this._sock, this._ardSelectedDisplay);
     RFB.messages.ardAutoPasteboard(this._sock, 1);
     this._sendEncodings();
     RFB.messages.pixelFormat(this._sock, this._fbDepth, true);
@@ -885,14 +902,17 @@ RFB.prototype._ardHandleDisplayInfo = function () {
 
     this._sock.rQskipBytes(8); // header consumed
 
-    this._ardDisplays = [];
+    const displays = [];
     for (let i = 0; i < displayCount; i++) {
         const id = this._sock.rQshift32();
         const dw = this._sock.rQshift16();
         const dh = this._sock.rQshift16();
         this._sock.rQskipBytes(4);  // magic
         this._sock.rQskipBytes(16); // pixel format
-        this._ardDisplays.push({ id, w: dw, h: dh });
+        displays.push({ id, w: dw, h: dh });
+    }
+    if (!this._ardDisplayInfo2Seen) {
+        this._ardDisplays = displays;
     }
 
     Log.Info("ARD: DisplayInfo — " + width + "x" + height +
@@ -999,20 +1019,69 @@ RFB.prototype._ardHandleDisplayInfo2Rect = function () {
              " " + this._FBU.width + "x" + this._FBU.height +
              ", payload: " + hexHead);
 
+    const info = parseDisplayInfo2(data);
     this._sock.rQskipBytes(2 + payloadSize);
+    this._ardApplyDisplayInfo2(info, this._FBU.width, this._FBU.height);
 
-    // Use FBU rect dimensions to resize if they indicate a new desktop size
-    const newW = this._FBU.width;
-    const newH = this._FBU.height;
-    if (newW > 0 && newH > 0 &&
-        (newW !== this._fbWidth || newH !== this._fbHeight)) {
+    return true;
+};
+
+// Take over the display list and the framebuffer size from a DisplayInfo2.
+// rectW/rectH are the dimensions of the rectangle that carried it, which
+// win over the ones in the payload when they are set.
+RFB.prototype._ardApplyDisplayInfo2 = function (info, rectW, rectH) {
+    let newW = rectW;
+    let newH = rectH;
+    if ((newW === 0 || newH === 0) && info !== null) {
+        newW = info.width;
+        newH = info.height;
+    }
+    const resized = newW > 0 && newH > 0 &&
+                    (newW !== this._fbWidth || newH !== this._fbHeight);
+    if (resized) {
         Log.Info("ARD: DisplayInfo2 resize " +
                  this._fbWidth + "x" + this._fbHeight +
                  " → " + newW + "x" + newH);
         this._resize(newW, newH);
     }
 
-    return true;
+    if (info === null) return;
+
+    // The server is now sending another display, or the same one at
+    // another size: ask for the whole picture once. While the first
+    // request of the session is still deferred, that one covers it.
+    const switched = this._ardShownDisplay !== null &&
+                     this._ardShownDisplay !== info.displayId;
+    this._ardShownDisplay = info.displayId;
+    if ((resized || switched) && !this._ardDeferredFBURequest &&
+        this._rfbConnectionState === 'connected' &&
+        this._fbWidth > 0 && this._fbHeight > 0) {
+        RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
+                                     this._fbWidth, this._fbHeight);
+        RFB.messages.ardAutoFBUpdate(this._sock, 1, 0, 0,
+                                     this._fbWidth, this._fbHeight);
+        this._sock.flush();
+    }
+
+    // A list without displays says nothing; keep the one we have
+    if (info.displays.length > 0) {
+        this._ardDisplays = info.displays;
+        this._ardDisplayInfo2Seen = true;
+
+        const choice = reconcileSelection(this._ardDisplays,
+                                          this._ardSelectedDisplay,
+                                          this._ardSelectedRole,
+                                          this._ardDisplayAutoSelected,
+                                          this._ardAutoSelectDisplay);
+        this._ardDisplayAutoSelected = choice.decided;
+        this.ardSelectedDisplay = choice.selected;
+    }
+
+    this.dispatchEvent(new CustomEvent("arddisplayinfo", {
+        detail: { width: this._fbWidth, height: this._fbHeight,
+                  displays: this._ardDisplays }
+    }));
+    ardUpdateInfoPanel(this);
 };
 
 // CursorAlpha (1104): [u32be cursorId][u32be dataSize][zlib data if dataSize>0]
@@ -1254,7 +1323,7 @@ Object.defineProperty(RFB.prototype, 'ardQualityPreset', {
 
 RFB.prototype._ardQualitySwitch = function () {
     this._sendEncodings();
-    RFB.messages.ardSetDisplay(this._sock);
+    RFB.messages.ardSetDisplay(this._sock, this._ardSelectedDisplay);
     if (this._fbWidth > 0 && this._fbHeight > 0) {
         RFB.messages.fbUpdateRequest(this._sock, false, 0, 0, this._fbWidth, this._fbHeight);
         RFB.messages.ardAutoFBUpdate(this._sock, 1, 0, 0, this._fbWidth, this._fbHeight);
@@ -1263,6 +1332,28 @@ RFB.prototype._ardQualitySwitch = function () {
     Log.Info("ARD: Quality switch (preset=" + this._ardQualityPreset + ")");
     ardUpdateInfoPanel(this);
 };
+
+// ===== Display selection =====
+
+// Display being viewed: a display id from the server's display list, or
+// null for all displays combined into one picture. The server answers a
+// change with a DisplayInfo2 carrying the new framebuffer size, and the
+// picture is requested when that arrives.
+Object.defineProperty(RFB.prototype, 'ardSelectedDisplay', {
+    get() { return this._ardSelectedDisplay; },
+    set(displayId) {
+        displayId = displayId === null || displayId === undefined
+            ? null : displayId >>> 0;
+        this._ardSelectedRole = displayId === null
+            ? null : displayRole(this._ardDisplays, displayId);
+        if (displayId === this._ardSelectedDisplay) return;
+        this._ardSelectedDisplay = displayId;
+        if (this._rfbConnectionState === 'connected' && this._rfbAppleARD) {
+            RFB.messages.ardSetDisplay(this._sock, displayId);
+        }
+    },
+    configurable: true,
+});
 
 // ===== Public method: requestFullUpdate =====
 
@@ -2116,14 +2207,13 @@ RFB.messages.ardSetMode = function (sock, mode) {
 };
 
 // SetDisplay (0x0d): [type(1)][u8 combineAll][pad(2)][u32be displayId] = 8 bytes
-RFB.messages.ardSetDisplay = function (sock) {
-    sock.sQpush8(msgTypeSetDisplay);  // 0x0d
-    sock.sQpush8(1);                  // combineAll = 1 (show all displays)
-    sock.sQpush16(0);                 // padding
-    sock.sQpush32(0);                 // displayId = 0 (all)
+// displayId null asks for all displays combined.
+RFB.messages.ardSetDisplay = function (sock, displayId = null) {
+    sock.sQpushBytes(setDisplayBytes(displayId));
     sock.flush();
 
-    Log.Info("ARD: Sent SetDisplay (combineAll=1)");
+    Log.Info("ARD: Sent SetDisplay (" +
+             (displayId === null ? "all displays" : "display " + displayId) + ")");
 };
 
 // AutoFBUpdate (0x09): [type(1)][pad(1)][u16be enabled][u32be interval]

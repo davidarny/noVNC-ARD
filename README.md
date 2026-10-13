@@ -19,6 +19,7 @@ A browser-based client for macOS Screen Sharing (protocol version `003.889`). Al
 **UI Controls**
 - Quality slider with 5 presets (adaptive, millions, thousands, gray, halftone)
 - Clipboard sync, send, and receive
+- Display selector for Macs with several displays (one display, or all combined)
 - Curtain screen lock with custom message
 - Remote user avatar display
 - Mac modifier key labels (Cmd, Opt)
@@ -55,12 +56,12 @@ open http://localhost:6088/ard.html
 | `ardEncryption` | integer | `2` | Encryption mode: `1` = keystroke-only, `2` = full tunnel |
 | `ardControlMode` | integer | `1` | Control mode: `0` = observe, `1` = shared, `2` = exclusive |
 | `virtualLogin` | integer | `1` | Session select: `0` = always share, `1` = show picker, `2` = always virtual |
-| `ardAutoSelectDisplay` | boolean | `true` | Automatically select display configuration |
+| `ardAutoSelectDisplay` | boolean | `true` | With several displays, start on the main display. `false` starts on all displays combined, as does hiding the selector |
 | `showArdUserAvatar` | boolean | `true` | Show remote user avatar in sidebar |
 | `showArdClipboard` | boolean | `true` | Show clipboard buttons |
 | `showArdScreenLock` | boolean | `true` | Show curtain lock button |
 | `showArdQuality` | boolean | `true` | Show quality selector |
-| `showArdDisplaySelect` | boolean | `true` | Show display selector |
+| `showArdDisplaySelect` | boolean | `true` | Show display selector (appears when the remote Mac has more than one display) |
 
 ## Public API
 
@@ -83,6 +84,7 @@ open http://localhost:6088/ard.html
 | `ardControlMode` | integer | read/write | `0` = observe, `1` = shared, `2` = exclusive |
 | `ardQualityPreset` | string | read/write | `halftone`, `gray`, `thousands`, `millions`, `adaptive` |
 | `ardCurtainActive` | boolean | read-only | Whether remote screen is curtain-locked |
+| `ardSelectedDisplay` | integer or null | read/write | Display being viewed: a display `id` from `arddisplayinfo`, or `null` for all displays combined |
 
 ### Events
 
@@ -90,6 +92,7 @@ open http://localhost:6088/ard.html
 |-------|--------|-------------|
 | `ardsessionselect` | `{ username, allowedCommands, hasConsoleUser }` | Server requests session type selection |
 | `arduserinfo` | `{ username, hasAvatar }` | Remote user info received |
+| `arddisplayinfo` | `{ width, height, displays }` | Display list received or changed. Each display has `id`, `main`, `w`, `h` |
 | `ardcurtainchange` | `{ active }` | Curtain lock state changed |
 | `ardencryptionstate` | `{ state }` | Session encryption activated |
 
@@ -117,6 +120,7 @@ noVNC-ARD/
   ard/
     ard-constants.js            encoding IDs, message types, status codes
     ard-patch.js                monkey-patches RFB prototype for ARD support
+    display-info.js             display list, display selection (no browser dependencies)
     crypto/
       aes128.js                 AES-128 (ECB + CBC modes)
       sha1.js                   SHA-1 hash
@@ -142,6 +146,9 @@ noVNC-ARD/
       user.svg                  Default user avatar (Lucide, ISC)
     tests/
       test.crypto.js            AES, SHA-1, PKCS#1 tests (FIPS/NIST vectors)
+      test.display-info.js      display list and display selection tests
+      test.mvs.js               MVS decoder tests (hand-built bitstreams)
+      test.version.js           version format test
       test.wire.js              ARD wire format and message builder tests
   ard.html                      entry point (loads noVNC + ARD patch)
   ard.css                       ARD-specific styles
@@ -153,11 +160,13 @@ Tests use Node.js built-in test runner (`node:test`):
 
 ```bash
 # Run all tests
-node --test ard/tests/test.crypto.js ard/tests/test.wire.js
+node --test ard/tests/test.*.js
 
 # Run individually
-node --test ard/tests/test.crypto.js   # crypto primitives
-node --test ard/tests/test.wire.js     # wire format + message builders
+node --test ard/tests/test.crypto.js         # crypto primitives
+node --test ard/tests/test.wire.js           # wire format + message builders
+node --test ard/tests/test.mvs.js            # MVS decoder
+node --test ard/tests/test.display-info.js   # display list + selection
 ```
 
 Crypto tests validate against FIPS 197 and NIST test vectors. Wire tests cover ARD message byte patterns, session select event dispatch, and state machine transitions.
