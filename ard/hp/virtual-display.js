@@ -59,16 +59,16 @@ export const DEFAULT_VIRTUAL_DISPLAY = {
     ],
 };
 
-// The largest picture a server has been seen to send, and to make room for
-// in a display.
-const MAX_PIXEL_WIDTH = 3840;
-const MAX_PIXEL_HEIGHT = 2160;
-// What a picture may hold: as many pixels as that one, in any shape. A
+// What a picture may hold: as many pixels as 3840 x 2160, in any shape. A
 // server names its encoder's limit as pixels per second (3840 x 2160 x 60),
-// not as a width and a height. No server has yet been sent a mode wider than
-// 3840 pixels or taller than 2160.
-const MAX_PIXELS = MAX_PIXEL_WIDTH * MAX_PIXEL_HEIGHT;
-const MAX_PIXEL_SIDE = 7680;
+// not as a width and a height.
+const MAX_PIXELS = 3840 * 2160;
+// The room every display is made with. The message can only give it as a
+// width and a height, so it is the widest and the tallest a picture may be:
+// those of an 8K display. Apple's viewer states 3840 x 2160 here, and no
+// server has yet been sent a mode wider or taller than that.
+const ROOM_PIXEL_WIDTH = 7680;
+const ROOM_PIXEL_HEIGHT = 4320;
 // The smallest mode a server shows as asked. Below it the server's window
 // server marks the mode "unsupported" and shows 800x600 at two pixels to the
 // point instead. From its mode lists: at two, 960x540 and 800x600 are shown
@@ -85,21 +85,20 @@ const MIN_HEIGHT_HIDPI = 540;
  * even, as video needs. The pixels are always the points times the scale: a
  * server given a mode where they were not made a display of its own choosing.
  *
- * Its largest size is 3840×2160, or the mode's where that is wider or
- * taller, so that a display made for one size can be given another on a
- * later connection.
+ * Its largest size is the same whatever the mode, so that a display made for
+ * one size can be given any other on a later connection.
  */
 export function virtualDisplayFor({ width, height, scale = 2 }) {
     if (!(width > 0 && height > 0 && scale > 0)) throw new Error('virtual display: bad size');
     const even = v => Math.max(2, Math.round(v / 2) * 2);
     const within = (w, h) => even(w * scale) * even(h * scale) <= MAX_PIXELS &&
-                             even(w * scale) <= MAX_PIXEL_SIDE && even(h * scale) <= MAX_PIXEL_SIDE;
+                             even(w * scale) <= ROOM_PIXEL_WIDTH && even(h * scale) <= ROOM_PIXEL_HEIGHT;
     // Not smaller than the smallest; then not more than the most, which wins
     const minHeight = scale > 1 ? MIN_HEIGHT_HIDPI : MIN_HEIGHT;
     const grow = Math.max(1, MIN_WIDTH / width, minHeight / height);
     const pw = width * grow * scale;
     const ph = height * grow * scale;
-    const fit = Math.min(1, Math.sqrt(MAX_PIXELS / (pw * ph)), MAX_PIXEL_SIDE / pw, MAX_PIXEL_SIDE / ph);
+    const fit = Math.min(1, Math.sqrt(MAX_PIXELS / (pw * ph)), ROOM_PIXEL_WIDTH / pw, ROOM_PIXEL_HEIGHT / ph);
     let w = even(width * grow * fit);
     let h = even(height * grow * fit);
     // Rounding to even numbers can take it just past
@@ -110,10 +109,7 @@ export function virtualDisplayFor({ width, height, scale = 2 }) {
     const pixelHeight = even(h * scale);
     return {
         name: DEFAULT_VIRTUAL_DISPLAY.name,
-        largest: {
-            pixelWidth: Math.max(MAX_PIXEL_WIDTH, pixelWidth),
-            pixelHeight: Math.max(MAX_PIXEL_HEIGHT, pixelHeight),
-        },
+        largest: { pixelWidth: ROOM_PIXEL_WIDTH, pixelHeight: ROOM_PIXEL_HEIGHT },
         modes: [{ pixelWidth, pixelHeight, width: w, height: h, refresh: 60 }],
     };
 }

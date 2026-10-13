@@ -89,16 +89,13 @@ describe('Virtual display of a chosen size', () => {
         deepStrictEqual([tall.pixelWidth, tall.pixelHeight, tall.width, tall.height], [2400, 3200, 1200, 1600]);
         const wide = mode(virtualDisplayFor({ width: 2000, height: 600, scale: 2 }));
         deepStrictEqual([wide.pixelWidth, wide.pixelHeight, wide.width, wide.height], [4000, 1200, 2000, 600]);
-        // and makes room for it in the display
-        deepStrictEqual(virtualDisplayFor({ width: 2000, height: 600, scale: 2 }).largest,
-                        { pixelWidth: 4000, pixelHeight: 2160 });
-        deepStrictEqual(virtualDisplayFor({ width: 1200, height: 1600, scale: 2 }).largest,
-                        { pixelWidth: 3840, pixelHeight: 3200 });
     });
 
-    it('never makes a side longer than 7680 pixels', () => {
+    it('never makes a picture wider than 7680 pixels or taller than 4320', () => {
         const strip = mode(virtualDisplayFor({ width: 5000, height: 480, scale: 2 }));
         deepStrictEqual([strip.pixelWidth, strip.width], [7680, 3840]);
+        const column = mode(virtualDisplayFor({ width: 800, height: 5000, scale: 1 }));
+        strictEqual(column.pixelHeight, 4320);
     });
 
     it('makes every dimension even', () => {
@@ -130,7 +127,7 @@ describe('Virtual display of a chosen size', () => {
                 deepStrictEqual([m.pixelWidth, m.pixelHeight], [m.width * scale, m.height * scale],
                                 `${width}x${height}@${scale}`);
                 strictEqual(m.pixelWidth * m.pixelHeight <= 3840 * 2160 &&
-                            m.pixelWidth <= 7680 && m.pixelHeight <= 7680, true, `${width}x${height}@${scale}`);
+                            m.pixelWidth <= 7680 && m.pixelHeight <= 4320, true, `${width}x${height}@${scale}`);
             }
         }
     });
@@ -150,13 +147,15 @@ describe('Virtual display of a chosen size', () => {
     });
 
     // A display is never later made wider or taller than the largest size
-    // it was made with, so it is made with room for any size asked for here.
-    it('makes the display with room for the largest picture, whatever its first size', () => {
-        for (const size of [{ width: 1600, height: 900, scale: 2 }, { width: 1618, height: 762, scale: 1 }]) {
+    // it was made with, so it is made with room for a picture of any shape
+    // asked for here: the same room every time.
+    it('makes the display with room for any shape, whatever its first size', () => {
+        for (const size of [{ width: 1600, height: 900, scale: 2 }, { width: 1618, height: 762, scale: 1 },
+                            { width: 2000, height: 600, scale: 2 }, { width: 1200, height: 1600, scale: 2 }]) {
             const display = virtualDisplayFor(size);
-            deepStrictEqual(display.largest, { pixelWidth: 3840, pixelHeight: 2160 });
+            deepStrictEqual(display.largest, { pixelWidth: 7680, pixelHeight: 4320 });
             const view = new DataView(buildVirtualDisplayMessage([display]).buffer);
-            deepStrictEqual([view.getUint32(12 + 138), view.getUint32(12 + 142)], [3840, 2160]);
+            deepStrictEqual([view.getUint32(12 + 138), view.getUint32(12 + 142)], [7680, 4320]);
         }
     });
 
