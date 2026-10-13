@@ -1516,6 +1516,7 @@ RFB.prototype._ardHpStart = function () {
         endpoint: this._ardHpEndpoint,
         sendOffer: bytes => RFB.messages.ardMediaStreamNegotiation(this._sock, bytes),
         createSink: opts => new VideoSink(Object.assign({ target: this._canvas }, opts)),
+        audioMuted: !!this._ardAudioMuted,
         // Loaded only when wanted: it brings a WebAssembly decoder with it.
         createAudio: this._ardHpAudio === false ? null
             : () => import('./hp/audio.js').then(m => m.AudioPipeline.create()),
@@ -1552,6 +1553,7 @@ RFB.prototype._ardHpOnState = function (state, reason) {
             state,
             reason: reason || null,
             failure: session ? session.failure : null,
+            video: session ? session.video : null,
             stats: session ? Object.assign({}, session.stats) : null,
         }
     }));
@@ -1595,6 +1597,16 @@ RFB.prototype._updateConnectionState = function (state) {
     }
     return _origUpdateConnectionState.call(this, state);
 };
+
+// Mute the Mac's sound (High Performance). Kept across reconnects by the page.
+Object.defineProperty(RFB.prototype, 'ardAudioMuted', {
+    get() { return !!this._ardAudioMuted; },
+    set(muted) {
+        this._ardAudioMuted = !!muted;
+        if (this._ardHp) this._ardHp.setAudioMuted(this._ardAudioMuted);
+    },
+    configurable: true,
+});
 
 // Whether High Performance media is on screen.
 Object.defineProperty(RFB.prototype, 'ardHighPerformanceActive', {

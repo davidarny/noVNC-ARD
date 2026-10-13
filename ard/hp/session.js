@@ -62,13 +62,14 @@ export class HpSession {
      * feedback:        { reports, acks, rateControl } — which RTCP to send
      * endpoint:        how the viewer describes itself in the offer
      */
-    constructor({ mediaUrl, sendOffer, createSink, createAudio, onState, feedback, endpoint,
-                  WebSocketImpl, now, log }) {
+    constructor({ mediaUrl, sendOffer, createSink, createAudio, audioMuted, onState, feedback,
+                  endpoint, WebSocketImpl, now, log }) {
         this._mediaUrl = mediaUrl;
         this._sendOffer = sendOffer;
         this._createSink = createSink;
         this._createAudio = createAudio;
         this._audio = null;
+        this._audioMuted = !!audioMuted;
         this._onState = onState || (() => {});
         this._feedback = Object.assign({ reports: true, acks: true, rateControl: true }, feedback);
         this._endpoint = endpoint;
@@ -98,6 +99,21 @@ export class HpSession {
         this._videoSeq = new SeqTracker();
         this._lastVideoPacketAt = null;
         this._lastSenderReport = [null, null];   // per channel: { middle, at }
+    }
+
+    // The picture size and stripe count from the server's answer.
+    get video() {
+        return this._answer ? this._answer.video : null;
+    }
+
+    get audioReady() {
+        return !!this._audio;
+    }
+
+    // Silence the sound without stopping it.
+    setAudioMuted(muted) {
+        this._audioMuted = !!muted;
+        if (this._audio && this._audio.setMuted) this._audio.setMuted(this._audioMuted);
     }
 
     // ----- lifecycle -----
@@ -267,7 +283,11 @@ export class HpSession {
         if (this._createAudio) {
             Promise.resolve().then(() => this._createAudio()).then((audio) => {
                 if (this._torn) audio.close();
-                else { this._audio = audio; this._log('audio ready'); }
+                else {
+                    this._audio = audio;
+                    if (audio.setMuted) audio.setMuted(this._audioMuted);
+                    this._log('audio ready');
+                }
             }, e => this._log('no audio: ' + (e && e.message ? e.message : e)));
         }
 

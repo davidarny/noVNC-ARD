@@ -179,6 +179,18 @@ describe('Audio pipeline', () => {
         deepStrictEqual(played, []);
     });
 
+    it('passes mute on to the sink', () => {
+        const { decoder, sink } = fakes(false);
+        const seen = [];
+        sink.setMuted = m => seen.push(m);
+        const pipeline = new AudioPipeline(decoder, sink);
+        pipeline.setMuted(true);
+        pipeline.setMuted(0);
+        pipeline.close();
+        pipeline.setMuted(true);
+        deepStrictEqual(seen, [true, false]);
+    });
+
     it('closes the decoder when the sink cannot be created', async () => {
         const { decoder } = fakes(false);
         let failed = false;

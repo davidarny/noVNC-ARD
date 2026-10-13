@@ -32,7 +32,11 @@ export class AudioSink {
             numberOfOutputs: 1,
             outputChannelCount: [2],
         });
-        this._node.connect(context.destination);
+        // The gain is the mute: the decoder and buffer keep running, so
+        // sound resumes in step when it is turned back on.
+        this._gain = context.createGain();
+        this._node.connect(this._gain);
+        this._gain.connect(context.destination);
         this.buffer = null;     // latest report from the worklet
         this._node.port.onmessage = (e) => { this.buffer = e.data; };
 
@@ -56,6 +60,11 @@ export class AudioSink {
         window.removeEventListener('keydown', this._resume, true);
     }
 
+    setMuted(muted) {
+        if (!this._gain) return;
+        this._gain.gain.setTargetAtTime(muted ? 0 : 1, this._context.currentTime, 0.01);
+    }
+
     get running() {
         return !!this._context && this._context.state === 'running';
     }
@@ -70,6 +79,7 @@ export class AudioSink {
         if (!this._context) return;
         this._stopWaiting();
         try { this._node.disconnect(); } catch (e) { /* already gone */ }
+        this._gain = null;
         this._context.close().catch(() => {});
         this._node = null;
         this._context = null;

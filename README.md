@@ -53,6 +53,7 @@ open http://localhost:6088/ard.html
 |-----------|------|---------|-------------|
 | `theme` | string | `novnc` | UI theme: `novnc`, `novnc-ard`, `noard` |
 | `ardQuality` | string | `adaptive` | Initial quality preset: `halftone`, `gray`, `thousands`, `millions`, `adaptive`, `highperf` (experimental, see [High Performance Mode](#high-performance-mode-experimental)) |
+| `ardSessionType` | string | ask | Skips the session dialog: `share` (the Mac's own displays), `virtual` (virtual login, standard quality) or `highperf` (virtual display in High Performance) |
 | `ardMediaPath` | string | `media` | Path of the relay's media WebSocket, used by `highperf` |
 | `ardHpVirtualDisplay` | boolean | `true` | In `highperf`, ask the Mac for a virtual display at 3840×2160. `false` shows its real displays |
 | `ardHpAudio` | boolean | `true` | In `highperf`, play the Mac's sound |
@@ -88,6 +89,8 @@ open http://localhost:6088/ard.html
 | `ardControlMode` | integer | read/write | `0` = observe, `1` = shared, `2` = exclusive |
 | `ardQualityPreset` | string | read/write | `halftone`, `gray`, `thousands`, `millions`, `adaptive` |
 | `ardCurtainActive` | boolean | read-only | Whether remote screen is curtain-locked |
+| `ardAudioMuted` | boolean | read/write | Mute the Mac's sound in High Performance mode |
+| `ardHighPerformanceActive` | boolean | read-only | Whether High Performance media is on screen |
 | `ardSelectedDisplay` | integer or null | read/write | Display being viewed: a display `id` from `arddisplayinfo`, or `null` for all displays combined |
 
 ### Events
@@ -99,7 +102,7 @@ open http://localhost:6088/ard.html
 | `arddisplayinfo` | `{ width, height, displays }` | Display list received or changed. Each display has `id`, `main`, `w`, `h` |
 | `ardcurtainchange` | `{ active }` | Curtain lock state changed |
 | `ardencryptionstate` | `{ state }` | Session encryption activated |
-| `ardhpstate` | `{ state, reason, failure, stats }` | High Performance session changed state: `offering`, `waiting`, `streaming`, `failed`, `closed` |
+| `ardhpstate` | `{ state, reason, failure, video, stats }` | High Performance session changed state: `offering`, `waiting`, `streaming`, `failed`, `closed` |
 
 ## Versioning
 
@@ -121,7 +124,9 @@ All presets include standard fallback encodings (CopyRect, Hextile, RRE) and ARD
 
 ## High Performance Mode (experimental)
 
-macOS 14 and later can send the screen as HEVC video over UDP instead of framebuffer updates: Screen Sharing's "High Performance" connection type. `?ardQuality=highperf` asks for it.
+macOS 14 and later can send the screen as HEVC video over UDP instead of framebuffer updates: Screen Sharing's "High Performance" connection type.
+
+Clicking Connect opens a dialog: **Share Display**, or **Virtual Display** in **High Performance** or **Standard** quality. Standard is the ordinary virtual login, as before; High Performance has the Mac create one virtual display at 3840×2160. The last choice is remembered. High Performance is greyed out, with the reason, when the browser cannot decode it or the connection has no media channel. `?ardSessionType=highperf` (or `?ardQuality=highperf`) chooses it without the dialog. During a High Performance session the toolbar has a button to mute the Mac's sound, and the info panel shows the picture size, bit rate and whether sound is playing.
 
 **Status: works against macOS 27 servers** (first live sessions 2026-10-12): the Mac creates a virtual display for the viewer and sends it at 3840×2160; sound plays. Experimental all the same: one relay, one session, no recovery from packet loss.
 

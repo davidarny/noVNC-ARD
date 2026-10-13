@@ -200,13 +200,12 @@
         const ardHpAudio = getParamCI('ardHpAudio') !== 'false';
         let ardHpSupported = false;
         let ardHpDisabled = false;
-        const ardHpSupportCheck = ardInitialQuality === 'highperf'
-            ? VideoSink.isSupported().then((ok) => {
-                ardHpSupported = ok;
-                if (!ok) Log.Warn('ARD: this browser cannot decode High Performance video; using adaptive');
-                if (UI.rfb) UI.rfb._ardHpAllowed = ok && !ardHpDisabled;
-            })
-            : Promise.resolve();
+        VideoSink.isSupported().then((ok) => {
+            ardHpSupported = ok;
+            if (!ok) Log.Info('ARD: this browser cannot decode High Performance video');
+            // A connection made before the answer was known (autoconnect)
+            if (UI.rfb && UI.rfb._rfbConnectionState === 'connecting') ardApplySessionChoice();
+        });
 
         function ardHpMediaUrl() {
             if (UI.getSetting('path') === 'msgport') return null;   // no media channel there yet
@@ -215,6 +214,213 @@
             const scheme = UI.getSetting('encrypt') ? 'wss' : 'ws';
             return scheme + '://' + host + (port ? ':' + port : '') + '/' + ardMediaPath;
         }
+
+        // ---------------------------------------------------------------
+        //  Session choice: Share Display, or Virtual Display in High
+        //  Performance or Standard quality
+        // ---------------------------------------------------------------
+        // ardSessionType=share|virtual|highperf forces the choice and skips
+        // the dialog, as does ardQuality=highperf. Otherwise the dialog is
+        // shown when the user clicks Connect, with the last choice selected.
+        const ardSessionTypeParam = (getParamCI('ardSessionType') || '').toLowerCase();
+        const ardForcedChoice =
+            ardSessionTypeParam === 'share' ? { display: 'share', quality: 'standard' } :
+            ardSessionTypeParam === 'virtual' ? { display: 'virtual', quality: 'standard' } :
+            (ardSessionTypeParam === 'highperf' || ardQualityParam === 'highperf')
+                ? { display: 'virtual', quality: 'highperf' } : null;
+        let ardSessionChoice = ardForcedChoice;     // null: nothing chosen, behave as before
+        let ardChoiceConfirmed = false;             // the dialog was just answered
+        let ardPendingConnect = null;
+        let ardAudioMuted = false;
+        let ardHpInfoTimer = null;
+
+        function ardStoredChoice() {
+            try {
+                const c = JSON.parse(localStorage.getItem('ard_session_choice'));
+                if (c && ['share', 'virtual'].includes(c.display) &&
+                    ['highperf', 'standard'].includes(c.quality)) return c;
+            } catch (e) { /* no storage, or nothing stored */ }
+            return { display: 'share', quality: 'highperf' };
+        }
+
+        // Why High Performance cannot be offered, or null if it can.
+        function ardHpUnusableReason() {
+            if (!ardHpSupported) return 'this browser cannot decode its video';
+            if (ardHpMediaUrl() === null) return 'this connection has no media channel';
+            if (ardHpDisabled) return 'it failed on the last attempt';
+            return null;
+        }
+
+        function ardNotice(text, type = 'normal', time = 6000) {
+            UI.showStatus(text, type, time);
+        }
+
+        const ardHpFailureText = {
+            'media-connect': 'the relay has no media channel',
+            'media-closed': 'the media channel closed',
+            'no-message1': 'the Mac did not offer it',
+            'no-answer': 'the Mac did not answer',
+            'no-picture': 'no picture arrived',
+            'decoder': 'the video could not be decoded',
+            'stalled': 'part of the picture was lost',
+            'bad-message1': 'the Mac sent something unexpected',
+            'bad-answer': 'the Mac sent something unexpected',
+        };
+
+        // Put the current choice into effect on the connection being made.
+        function ardApplySessionChoice() {
+            const rfb = UI.rfb;
+            if (!rfb) return;
+            const choice = ardSessionChoice;
+            const wantHp = !!choice && choice.display === 'virtual' && choice.quality === 'highperf';
+            const hp = wantHp && ardHpUnusableReason() === null;
+            // The same choice answers the Mac's own question when someone
+            // else is using its display, unless the URL decides that.
+            rfb._ardVirtualLogin = (choice && isNaN(virtualLoginParam))
+                ? (choice.display === 'virtual' ? 2 : 0) : ardVirtualLogin;
+            rfb._ardQualityPreset = hp ? 'highperf'
+                : (ardInitialQuality === 'highperf' ? 'adaptive' : ardInitialQuality);
+            rfb._ardHpAllowed = hp;
+            rfb._ardHpMediaUrl = hp ? ardHpMediaUrl() : null;
+            rfb._ardHpFeedback = ardHpFeedback;
+            rfb._ardHpVirtualDisplay = ardHpVirtualDisplay;
+            rfb._ardHpAudio = ardHpAudio;
+            rfb.ardAudioMuted = ardAudioMuted;
+            // Virtual Display in Standard quality is the ordinary virtual
+            // login: nothing more is asked of the Mac.
+            return { wantHp, hp };
+        }
+
+        function ardOnHpState(e) {
+            const d = e.detail;
+            if (d.state === 'streaming') {
+                const v = d.video;
+                ardNotice('High Performance' + (v ? ' · ' + v.width + '×' + v.height : ''), 'normal', 3000);
+                ardShowAudioButton(ardHpAudio);
+                ardStartHpInfo();
+            } else if (d.state === 'failed') {
+                const why = ardHpFailureText[d.reason] || d.reason;
+                Log.Warn('ARD: High Performance failed (' + d.failure + ')');
+                ardNotice('High Performance stopped: ' + why + '. Using Standard.', 'warn', 8000);
+                ardHpDisabled = true;
+                ardHpUiReset();
+                // The Mac never started the negotiation: the session is an
+                // ordinary one and carries on. Otherwise start again without.
+                if (d.reason !== 'no-message1' && UI.rfb) {
+                    UI.rfb.disconnect();
+                }
+            } else if (d.state === 'closed') {
+                ardHpUiReset();
+            }
+        }
+
+        function ardShowAudioButton(show) {
+            const btn = document.getElementById('noVNC_audio_button');
+            btn.classList.toggle('noVNC_hidden', !show);
+            btn.classList.toggle('noVNC_muted', ardAudioMuted);
+            btn.title = ardAudioMuted ? "Unmute the Mac's sound" : "Mute the Mac's sound";
+        }
+
+        function ardHpUiReset() {
+            ardShowAudioButton(false);
+            if (ardHpInfoTimer) {
+                clearInterval(ardHpInfoTimer);
+                ardHpInfoTimer = null;
+            }
+            for (const id of ['ard_info_video_row', 'ard_info_audio_row']) {
+                document.getElementById(id).classList.add('noVNC_hidden');
+            }
+        }
+
+        // Once a second while High Performance runs: what is arriving.
+        function ardStartHpInfo() {
+            let last = null;
+            const update = () => {
+                const s = UI.rfb && UI.rfb._ardHp;
+                if (!s || !s.video) return;
+                const now = performance.now();
+                let rate = '';
+                if (last) {
+                    const dt = (now - last.at) / 1000;
+                    const mbit = (s.stats.videoBytes - last.bytes) * 8 / 1e6 / dt;
+                    const pics = (s.stats.pictures - last.pictures) / dt;
+                    rate = ' · ' + mbit.toFixed(1) + ' Mbit/s · ' + Math.round(pics) + ' pictures/s';
+                }
+                last = { at: now, bytes: s.stats.videoBytes, pictures: s.stats.pictures };
+                document.getElementById('ard_info_video').textContent =
+                    'HEVC ' + s.video.width + '×' + s.video.height + rate;
+                document.getElementById('ard_info_audio').textContent =
+                    !ardHpAudio ? 'Off' : !s.audioReady ? 'Not available' : ardAudioMuted ? 'Muted' : 'On';
+            };
+            for (const id of ['ard_info_video_row', 'ard_info_audio_row']) {
+                document.getElementById(id).classList.remove('noVNC_hidden');
+            }
+            if (ardHpInfoTimer) clearInterval(ardHpInfoTimer);
+            ardHpInfoTimer = setInterval(update, 1000);
+            update();
+        }
+
+        // ----- the dialog -----
+        function ardSyncTypeDialog() {
+            const dlg = document.getElementById('noVNC_ard_type_dlg');
+            const virtual = dlg.querySelector('input[name="ard_display"][value="virtual"]').checked;
+            const hpInput = dlg.querySelector('input[name="ard_quality"][value="highperf"]');
+            const stdInput = dlg.querySelector('input[name="ard_quality"][value="standard"]');
+            const reason = ardHpUnusableReason();
+            document.getElementById('noVNC_ard_type_quality').classList.toggle('noVNC_ard_type_off', !virtual);
+            stdInput.disabled = !virtual;
+            hpInput.disabled = !virtual || reason !== null;
+            if (reason !== null && hpInput.checked) stdInput.checked = true;
+            hpInput.closest('label').classList.toggle('noVNC_ard_type_off', reason !== null);
+            document.getElementById('noVNC_ard_type_hp_note').textContent = reason === null
+                ? 'Sharpest and smoothest, with sound. Needs a fast network'
+                : 'Not available: ' + reason;
+        }
+
+        function ardOpenTypeDialog(evt, password) {
+            const dlg = document.getElementById('noVNC_ard_type_dlg');
+            const c = ardSessionChoice || ardStoredChoice();
+            ardPendingConnect = { evt, password };
+            dlg.querySelector('input[name="ard_display"][value="' + c.display + '"]').checked = true;
+            dlg.querySelector('input[name="ard_quality"][value="' + c.quality + '"]').checked = true;
+            ardSyncTypeDialog();
+            UI.closeConnectPanel();
+            dlg.classList.add('noVNC_open');
+            document.getElementById('noVNC_ard_type_continue').focus();
+        }
+
+        function ardCloseTypeDialog() {
+            document.getElementById('noVNC_ard_type_dlg').classList.remove('noVNC_open');
+        }
+
+        document.getElementById('noVNC_ard_type_dlg').addEventListener('change', ardSyncTypeDialog);
+        document.getElementById('noVNC_ard_type_cancel').addEventListener('click', () => {
+            ardCloseTypeDialog();
+            ardPendingConnect = null;
+            UI.openConnectPanel();
+        });
+        document.getElementById('noVNC_ard_type_continue').addEventListener('click', () => {
+            const dlg = document.getElementById('noVNC_ard_type_dlg');
+            ardSessionChoice = {
+                display: dlg.querySelector('input[name="ard_display"]:checked').value,
+                quality: dlg.querySelector('input[name="ard_quality"]:checked').value,
+            };
+            try {
+                localStorage.setItem('ard_session_choice', JSON.stringify(ardSessionChoice));
+            } catch (e) { /* not remembered, then */ }
+            ardCloseTypeDialog();
+            const pending = ardPendingConnect;
+            ardPendingConnect = null;
+            // A fresh choice gives High Performance another chance.
+            ardHpDisabled = false;
+            ardChoiceConfirmed = true;
+            UI.connect(pending ? pending.evt : undefined, pending ? pending.password : undefined);
+        });
+        document.getElementById('noVNC_audio_button').addEventListener('click', () => {
+            ardAudioMuted = !ardAudioMuted;
+            if (UI.rfb) UI.rfb.ardAudioMuted = ardAudioMuted;
+            ardShowAudioButton(true);
+        });
 
         // ardControlMode: 0=observe, 1=shared control (default), 2=exclusive
         const ardControlModeParam = parseInt(getParamCI('ardControlMode'), 10);
@@ -755,35 +961,28 @@
 
         const _origUIConnect = UI.connect;
         UI.connect = function (evt, password) {
+            // The user clicked Connect: ask what kind of session, unless
+            // the URL has decided or the dialog has just been answered.
+            // Reconnects and autoconnect come without an event and reuse
+            // the choice already made.
+            if (evt instanceof Event && !ardForcedChoice && !ardChoiceConfirmed &&
+                typeof UI.rfb === 'undefined') {
+                ardOpenTypeDialog(evt, password);
+                return;
+            }
+            ardChoiceConfirmed = false;
+
             _origUIConnect.call(UI, evt, password);
             ardInhibitReconnect = false;
             if (UI.rfb) {
-                // Apply virtualLogin setting, initial quality, and initial control mode
-                UI.rfb._ardVirtualLogin = ardVirtualLogin;
-                UI.rfb._ardQualityPreset = ardInitialQuality;
+                // Apply the session choice, initial quality and control mode
                 UI.rfb._ardControlMode = ardInitialControlMode;
-                if (ardInitialQuality === 'highperf') {
-                    UI.rfb._ardHpAllowed = ardHpSupported && !ardHpDisabled;
-                    UI.rfb._ardHpMediaUrl = ardHpMediaUrl();
-                    UI.rfb._ardHpFeedback = ardHpFeedback;
-                    UI.rfb._ardHpVirtualDisplay = ardHpVirtualDisplay;
-                    UI.rfb._ardHpAudio = ardHpAudio;
-                    UI.rfb.addEventListener('ardhpstate', (e) => {
-                        const d = e.detail;
-                        if (d.state === 'streaming') {
-                            Log.Info('ARD: High Performance video on screen');
-                        } else if (d.state === 'failed') {
-                            Log.Warn('ARD: High Performance failed (' + d.failure + '); falling back to adaptive');
-                            ardHpDisabled = true;
-                            // The server never started the negotiation: the
-                            // session is an ordinary one and carries on.
-                            // Otherwise start again without it.
-                            if (d.reason !== 'no-message1' && UI.rfb) {
-                                UI.rfb.disconnect();
-                            }
-                        }
-                    });
+                const applied = ardApplySessionChoice();
+                if (applied.wantHp && !applied.hp && ardHpSupported !== false) {
+                    ardNotice('High Performance is not available: ' +
+                              ardHpUnusableReason() + '. Using Standard.', 'warn');
                 }
+                UI.rfb.addEventListener('ardhpstate', ardOnHpState);
                 // Without the selector there would be no way back to
                 // the other displays, so stay on all of them
                 UI.rfb._ardAutoSelectDisplay = ardAutoSelectDisplay && showArdDisplaySelect;
@@ -953,6 +1152,7 @@
             document.getElementById('noVNC_curtain_button').classList.add('noVNC_hidden');
             document.getElementById('noVNC_curtain_button').disabled = true;
             ardCloseCurtainPanel();
+            ardHpUiReset();
             document.getElementById('noVNC_display_button').classList.add('noVNC_hidden');
             document.getElementById('noVNC_display_list').replaceChildren();
             ardCloseDisplayPanel();
@@ -1177,6 +1377,18 @@
             </div>
             </div>
 
+            <!-- ARD sound (High Performance) -->
+            <button id="noVNC_audio_button" class="noVNC_button noVNC_icon_btn noVNC_hidden"
+                    title="Mute the Mac's sound">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+                    <path class="noVNC_audio_on" d="M15.5 8.5a5 5 0 0 1 0 7"/>
+                    <path class="noVNC_audio_on" d="M18.5 5.5a9 9 0 0 1 0 13"/>
+                    <path class="noVNC_audio_off" d="M22 9l-6 6"/>
+                    <path class="noVNC_audio_off" d="M16 9l6 6"/>
+                </svg>
+            </button>
+
             <!-- ARD display selector -->
             <button id="noVNC_display_button" class="noVNC_button noVNC_icon_btn noVNC_hidden"
                     title="Displays">
@@ -1362,6 +1574,8 @@
                     <tr><td>Displays</td><td id="ard_info_displays">—</td></tr>
                     <tr><td>Encryption</td><td id="ard_info_encryption">—</td></tr>
                     <tr><td>Quality</td><td id="ard_info_quality">—</td></tr>
+                    <tr id="ard_info_video_row" class="noVNC_hidden"><td>Video</td><td id="ard_info_video">—</td></tr>
+                    <tr id="ard_info_audio_row" class="noVNC_hidden"><td>Sound</td><td id="ard_info_audio">—</td></tr>
                     <tr><td>Mode</td><td id="ard_info_mode">—</td></tr>
                     <tr><td>Session</td><td id="ard_info_session">—</td></tr>
                     <tr><td>Remote User</td><td id="ard_info_user">—</td></tr>
@@ -1459,6 +1673,37 @@
                 Share Display</button>
             <button id="noVNC_ard_session_virtual_button">
                 Virtual Display</button>
+        </div>
+    </div>
+
+    <!-- ARD Session Choice Dialog -->
+    <div id="noVNC_ard_type_dlg" class="noVNC_panel">
+        <div class="noVNC_heading">Choose Session Type</div>
+        <label class="noVNC_ard_type_row">
+            <input type="radio" name="ard_display" value="share">
+            <span><strong>Share Display</strong>
+                <small>See and control what is on the Mac's own screens</small></span>
+        </label>
+        <label class="noVNC_ard_type_row">
+            <input type="radio" name="ard_display" value="virtual">
+            <span><strong>Virtual Display</strong>
+                <small>A display the Mac makes for this session</small></span>
+        </label>
+        <div id="noVNC_ard_type_quality">
+            <label class="noVNC_ard_type_row">
+                <input type="radio" name="ard_quality" value="highperf">
+                <span><strong>High Performance</strong>
+                    <small id="noVNC_ard_type_hp_note"></small></span>
+            </label>
+            <label class="noVNC_ard_type_row">
+                <input type="radio" name="ard_quality" value="standard">
+                <span><strong>Standard</strong>
+                    <small>Works with most network conditions</small></span>
+            </label>
+        </div>
+        <div class="button_row">
+            <button id="noVNC_ard_type_cancel">Cancel</button>
+            <button id="noVNC_ard_type_continue" class="noVNC_submit">Continue</button>
         </div>
     </div>
 

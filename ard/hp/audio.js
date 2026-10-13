@@ -86,6 +86,10 @@ export class AudioPipeline {
         this._busy = false;
     }
 
+    setMuted(muted) {
+        if (!this._closed && this._sink.setMuted) this._sink.setMuted(!!muted);
+    }
+
     close() {
         if (this._closed) return;
         this._closed = true;

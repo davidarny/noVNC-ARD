@@ -455,6 +455,17 @@ describe('High Performance session', () => {
         ok(audio.closed);
     });
 
+    it('mutes the audio pipeline, whether asked before or after it is ready', async () => {
+        const audio = { muted: [], push() {}, setMuted(m) { this.muted.push(m); }, close() {} };
+        await negotiate({ createAudio: async () => audio, audioMuted: true });
+        await until(() => session.audioReady, 'audio');
+        deepStrictEqual(audio.muted, [true]);
+        session.setAudioMuted(false);
+        session.setAudioMuted(true);
+        deepStrictEqual(audio.muted, [true, false, true]);
+        deepStrictEqual(session.video, { ssrc: SERVER_VIDEO_SSRC, width: 3840, height: 2160, stripes: 4 });
+    });
+
     it('carries on without sound when the audio pipeline cannot be made', async () => {
         const keys = await negotiate({ createAudio: async () => { throw new Error('no AudioWorklet'); } });
         const audioIn = await createContext(keys.audio.fromServer.key, keys.audio.fromServer.salt);
