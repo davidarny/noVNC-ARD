@@ -12,7 +12,7 @@ import * as protobuf from '../hp/protobuf.js';
 import * as plist from '../hp/plist.js';
 import { deflate, inflate } from '../hp/zlib.js';
 import {
-    parseMessage1, generateSecrets, splitKeyBlock, buildOffer, parseAnswer,
+    parseMessage1, generateSecrets, splitKeyBlock, buildOffer, parseAnswer, parseStreamPorts,
     ntpFromUnixMs, KEY_BLOCK_LENGTH,
 } from '../hp/negotiation.js';
 
@@ -258,5 +258,25 @@ describe('Answer', () => {
 
         const garbage = Uint8Array.from({ length: 64 }, (_, i) => i * 7);
         await rejects(parseAnswer(answerPayload(audio, garbage)));
+    });
+});
+
+// The rectangle with encoding 1010 also carries a short notice: the UDP
+// ports the server will send from. It comes before every negotiation.
+describe('Stream ports notice', () => {
+    const NOTICE = new Uint8Array([
+        0x00, 0x24, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x17, 0x0c, 0x00, 0x00, 0x00, 0x01,
+        0x17, 0x0d, 0x00, 0x00, 0x00, 0x01, ...new Array(16).fill(0)]);
+
+    it('reads the two ports', () => {
+        deepStrictEqual(parseStreamPorts(NOTICE), { audioPort: 5900, videoPort: 5901 });
+    });
+
+    it('is not taken for an answer, nor an answer for it', async () => {
+        const answer = answerPayload(await answerStream(audioBlob(1)), await answerStream(videoBlob([
+            { field: 1, value: 2 }, { field: 4, value: 3840 }, { field: 5, value: 2160 }, { field: 6, value: 4 }])));
+        strictEqual(parseStreamPorts(answer), null);
+        strictEqual(parseStreamPorts(new Uint8Array([0])), null);
+        strictEqual(parseStreamPorts(NOTICE.subarray(0, 12)), null);
     });
 });

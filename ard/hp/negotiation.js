@@ -190,6 +190,33 @@ function requireNumber(value, what) {
 }
 
 /*
+ * The rectangle with encoding 1010 carries two things, told apart by the
+ * first 16 bits after the length: 1, the UDP ports the server will send
+ * from, and 2, its answer to an offer. The ports notice comes before every
+ * negotiation: at the start of a session before Message 1, and again by
+ * itself when the server's display changes and it wants a new offer.
+ *
+ *   0    2   length of what follows (36)
+ *   2    2   1
+ *   4    2   1
+ *   6    4   0
+ *  10    2   audio port     12    4   1
+ *  16    2   video port     18    4   1
+ *  22   16   0
+ *
+ * Returns { audioPort, videoPort }, or null when `payload` is not one.
+ */
+const KIND_PORTS = 1;
+
+export function parseStreamPorts(payload) {
+    if (payload.length < 2) return null;
+    const length = u16(payload, 0);
+    if (length < 20 || payload.length < 2 + length) return null;
+    if (u16(payload, 2) !== KIND_PORTS) return null;
+    return { audioPort: u16(payload, 10), videoPort: u16(payload, 16) };
+}
+
+/*
  * The answer. `payload` is the rectangle's payload, starting with its
  * 16-bit length. Resolves to the server's SSRCs and the picture size.
  */

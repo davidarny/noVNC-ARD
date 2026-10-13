@@ -12,7 +12,7 @@
  * UDP datagram.
  */
 
-import { parseMessage1, generateSecrets, buildOffer, parseAnswer, splitKeyBlock } from './negotiation.js';
+import { parseMessage1, generateSecrets, buildOffer, parseAnswer, splitKeyBlock, parseStreamPorts } from './negotiation.js';
 import { createContext } from './srtp.js';
 import { VideoAssembler } from './rtp-video.js';
 import { receiverReport, pictureAck, rateControl } from './feedback.js';
@@ -285,6 +285,14 @@ export class HpSession {
 
     // The payload of the rectangle with encoding 1010.
     handleAnswer(payload) {
+        // The same rectangle brings the server's ports before a negotiation.
+        // Usually that is before the offer; a server slow to make its
+        // display sent it after, and it was taken for an answer.
+        const ports = parseStreamPorts(payload);
+        if (ports) {
+            this._log('server ports: audio ' + ports.audioPort + ', video ' + ports.videoPort);
+            return;
+        }
         if (this.state !== 'offering' || this._answering) return;
         this._answering = true;
         this._startMedia(payload).catch(e => this._fail('bad-answer', e.message));

@@ -371,6 +371,21 @@ describe('High Performance session', () => {
         deepStrictEqual(states, ['offering', 'failed:no-answer']);
     });
 
+    it('does not take the ports notice for an answer', async () => {
+        create();
+        ws.open();
+        session.handleMessage1(message1());
+        await until(() => offers.length === 1, 'the offer');
+        session.handleAnswer(new Uint8Array([
+            0x00, 0x24, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x17, 0x0c, 0x00, 0x00, 0x00, 0x01,
+            0x17, 0x0d, 0x00, 0x00, 0x00, 0x01, ...new Array(16).fill(0)]));
+        await settle();
+        strictEqual(session.state, 'offering');
+        session.handleAnswer(await answer());
+        await until(() => session.state !== 'offering', 'the answer to be handled');
+        strictEqual(session.state, 'waiting');
+    });
+
     it('fails on an answer it cannot read', async () => {
         create();
         ws.open();
