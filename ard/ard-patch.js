@@ -344,6 +344,8 @@ RFB.prototype._negotiateServerInit = function () {
 
         Log.Info("ARD: Extended ServerInit — flags=0x" +
                  this._ardServerFlags.toString(16).padStart(8, '0') +
+                 ", capabilities=" + Array.from(this._ardCapabilityBitmap,
+                                                b => b.toString(16).padStart(2, '0')).join('') +
                  ", sessionSelect=" + this._ardSessionSelectNeeded +
                  ", name=" + name);
     } else {
@@ -1556,8 +1558,18 @@ RFB.prototype._ardHpWanted = function () {
 // for the viewer, at the viewer's pixel density. The request has to reach
 // the server before SetEncodings. Without it the server sends its real
 // displays instead.
+//
+// That is before the server has shown that it knows High Performance, and
+// nothing in its ServerInit is known to say so. A server old enough to
+// send the plain ServerInit is certainly too old and is not sent the
+// request. What any other server without High Performance does with it is
+// not known; the page does not try again on a connection that ends early.
 RFB.prototype._ardHpRequestVirtualDisplay = function () {
     if (!this._ardHpWanted() || this._ardHpVirtualDisplay === false) return;
+    if (!this._ardCapabilityBitmap) {
+        Log.Info("ARD HP: plain ServerInit, not asking for a virtual display");
+        return;
+    }
     RFB.messages.ardVirtualDisplay(this._sock, buildVirtualDisplayMessage());
 };
 

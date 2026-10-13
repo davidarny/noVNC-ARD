@@ -201,6 +201,10 @@
         const ardHpAudio = getParamCI('ardHpAudio') !== 'false';
         let ardHpSupported = false;
         let ardHpDisabled = false;
+        // The connection in progress asked for High Performance:
+        // { streamingSince }, null once it has failed or was not asked for
+        let ardHpAttempt = null;
+        const ardHpEarlyMs = 60000;
         VideoSink.isSupported().then((ok) => {
             ardHpSupported = ok;
             if (!ok) Log.Info('ARD: this browser cannot decode High Performance video');
@@ -290,6 +294,8 @@
             rfb._ardQualityPreset = hp ? 'highperf'
                 : (ardInitialQuality === 'highperf' ? 'adaptive' : ardInitialQuality);
             rfb._ardHpAllowed = hp;
+            if (!hp) ardHpAttempt = null;
+            else if (!ardHpAttempt) ardHpAttempt = { streamingSince: null };
             rfb._ardHpMediaUrl = hp ? ardHpMediaUrl() : null;
             rfb._ardHpFeedback = ardHpFeedback;
             rfb._ardHpVirtualDisplay = ardHpVirtualDisplay;
@@ -305,6 +311,7 @@
             if (d.state === 'streaming') {
                 const v = d.video;
                 ardNotice('High Performance' + (v ? ' · ' + v.width + '×' + v.height : ''), 'normal', 3000);
+                if (ardHpAttempt) ardHpAttempt.streamingSince = performance.now();
                 ardShowAudioButton(ardHpAudio);
                 ardStartHpInfo();
             } else if (d.state === 'failed') {
@@ -312,6 +319,7 @@
                 Log.Warn('ARD: High Performance failed (' + d.failure + ')');
                 ardNotice('High Performance stopped: ' + why + '. Using Standard.', 'warn', 8000);
                 ardHpDisabled = true;
+                ardHpAttempt = null;
                 ardHpUiReset();
                 // The Mac never started the negotiation: the session is an
                 // ordinary one and carries on. Otherwise start again without.
@@ -1066,6 +1074,7 @@
             // session to open, unless the URL has decided. Reconnects and
             // autoconnect come without an event and reuse the choice made.
             if (evt instanceof Event) ardAskOnThisConnect = !ardForcedChoice;
+            ardHpAttempt = null;
 
             _origUIConnect.call(UI, evt, password);
             ardInhibitReconnect = false;
@@ -1240,6 +1249,21 @@
             ardCloseDisplayPanel();
             const wasConnected = UI.connected;
             const isARD = wasConnected && ardReconnectCredentials !== null;
+
+            // The connection was lost before High Performance had a
+            // picture, or soon after. The Mac may not know the mode and
+            // hang up on what it is sent, or end such sessions itself:
+            // either way the next connection must not go the same way.
+            const attempt = ardHpAttempt;
+            ardHpAttempt = null;
+            if (attempt && wasConnected && !ardInhibitReconnect &&
+                (attempt.streamingSince === null ||
+                 performance.now() - attempt.streamingSince < ardHpEarlyMs)) {
+                ardHpDisabled = true;
+                Log.Warn('ARD: connection lost ' + (attempt.streamingSince === null
+                    ? 'before High Performance started' : 'soon after High Performance started'));
+                ardNotice('The connection was lost in High Performance. Using Standard.', 'warn', 8000);
+            }
 
             if (isARD && !ardInhibitReconnect) {
                 // Circuit breaker: rapid disconnect loop detection
