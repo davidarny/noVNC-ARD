@@ -49,6 +49,10 @@ const OVERLOAD_MS = 2000;
 // picture would stay as it was, looking alive.
 const MEDIA_SILENCE_MS = 3000;
 
+// After a resize, how long to keep the old picture (blurred) waiting for the
+// new one to be fully drawn before showing the new stream regardless.
+const RESIZE_SHOW_MS = 2500;
+
 function isRtcp(packet) {
     return packet.length > 1 && packet[1] >= 192 && packet[1] <= 223;
 }
@@ -370,15 +374,27 @@ export class HpSession {
             onPicture: p => this._onPicture(p),
             onStall: s => this._log('resize: waiting for picture ' + s.expectedDon),
         });
+        // The old picture stays, blurred, until the new size is really on
+        // screen: a whole first picture painted and composited. A safety
+        // timer lifts it even if that first picture never completes.
+        let shown = false;
+        const showNew = () => {
+            if (shown) return;
+            shown = true;
+            clearTimeout(showTimer);
+            if (oldSink && oldSink !== sink) oldSink.close();
+            this._resizeDone();
+        };
         const sink = this._createSink({
             width: answer.video.width,
             height: answer.video.height,
             stripes: answer.video.stripes,
-            onFirstFrame: () => {
-                if (oldSink) oldSink.close();
-                this._resizeDone();
-            },
-            onError: reason => this._log('resize sink error: ' + reason),
+            onFirstPicture: () => showNew(),
+            onError: reason => { this._log('resize sink error: ' + reason); showNew(); },
+        });
+        const showTimer = this._timeout(RESIZE_SHOW_MS, () => {
+            this._log('resize: first picture slow; showing anyway');
+            showNew();
         });
 
         // From here the new keys, streams and sink are the session's.

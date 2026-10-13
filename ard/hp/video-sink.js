@@ -72,14 +72,23 @@ export class VideoSink {
      * view():  optional; the part of the framebuffer the canvas shows, as
      *          overlayGeometry takes it
      * width, height:  picture size from the server's answer
-     * onFirstFrame():  the first decoded frame has been painted
+     * onFirstFrame():  the first decoded stripe has been painted
+     * onFirstPicture(): a whole first picture has been painted and shown on
+     *                   screen (the next animation frame after its last
+     *                   stripe); used to lift a resize blur only once the
+     *                   new size is actually drawn
+     * stripes:  how many stripes make one picture
      * onError(reason):  the decoder failed; the sink is unusable afterwards
      */
-    constructor({ target, view, width, height, onFirstFrame, onError }) {
+    constructor({ target, view, width, height, stripes, onFirstFrame, onFirstPicture, onError }) {
         this._target = target;
         this._view = view || (() => null);
         this._viewKey = '';
         this._onFirstFrame = onFirstFrame || (() => {});
+        this._onFirstPicture = onFirstPicture || (() => {});
+        this._stripes = stripes || 1;
+        this._firstStripes = new Set();
+        this._fullShown = false;
         this._onError = onError || (() => {});
         this._stripeOf = new Map();     // chunk timestamp (don) → stripe
         this._decoder = null;
@@ -165,6 +174,15 @@ export class VideoSink {
             this._canvas.style.visibility = 'visible';
             this._align();
             this._onFirstFrame();
+        }
+        // The first whole picture: tell the caller once the browser has had
+        // a frame to composite it, so a resize blur lifts on a real redraw.
+        if (!this._fullShown) {
+            this._firstStripes.add(stripe);
+            if (this._firstStripes.size >= this._stripes) {
+                this._fullShown = true;
+                requestAnimationFrame(() => { if (!this._closed) this._onFirstPicture(); });
+            }
         }
     }
 

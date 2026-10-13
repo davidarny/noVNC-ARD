@@ -753,8 +753,8 @@ describe('High Performance session', () => {
         strictEqual(session.state, 'streaming');
 
         // The new picture arrives: the old sink is closed.
-        sinks[1].opts.onFirstFrame();
-        ok(sinks[0].closed, 'old sink closed on the new first frame');
+        sinks[1].opts.onFirstPicture();
+        ok(sinks[0].closed, 'old sink closed on the new picture');
         strictEqual(session.state, 'streaming');
     });
 
@@ -766,7 +766,7 @@ describe('High Performance session', () => {
         session.handleAnswer(await answerWith({
             audioSsrc: 0x11112222, videoSsrc: 0x33334444, width: 2560, height: 1440, stripes: 4 }));
         await until(() => sinks.length === 2, 'the new sink');
-        sinks[1].opts.onFirstFrame();
+        sinks[1].opts.onFirstPicture();
 
         const server = await createContext(keys.video.fromServer.key, keys.video.fromServer.salt);
         const p0 = await server.protectRtp(keyPicturePacket({ stripe: 0, seq: 100, don: 1000, frame: 7 }));
@@ -785,7 +785,7 @@ describe('High Performance session', () => {
             audioSsrc: 0x11112222, videoSsrc: 0x33334444, width: 2560, height: 1440, stripes: 4 }));
         await until(() => sinks.length === 2, 'the new sink');
         deepStrictEqual(resizes, [true]);          // still dimmed: no picture yet
-        sinks[1].opts.onFirstFrame();
+        sinks[1].opts.onFirstPicture();
         deepStrictEqual(resizes, [true, false]);   // dim off when the picture shows
     });
 
