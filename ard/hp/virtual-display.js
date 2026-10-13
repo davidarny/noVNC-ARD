@@ -69,8 +69,14 @@ const MAX_PIXEL_HEIGHT = 2160;
 // 3840 pixels or taller than 2160.
 const MAX_PIXELS = MAX_PIXEL_WIDTH * MAX_PIXEL_HEIGHT;
 const MAX_PIXEL_SIDE = 7680;
-const MIN_WIDTH = 640;
+// The smallest mode a server shows as asked. Below it the server's window
+// server marks the mode "unsupported" and shows 800x600 at two pixels to the
+// point instead. From its mode lists: at two, 960x540 and 800x600 are shown
+// and 1478x480 and 672x541 are not; at one, 1478x480 is shown and 640x480 is
+// not. The true limits lie somewhere between those.
+const MIN_WIDTH = 800;
 const MIN_HEIGHT = 480;
+const MIN_HEIGHT_HIDPI = 540;
 
 /*
  * A display of one mode: `width` × `height` points, drawn at `scale` pixels
@@ -89,7 +95,8 @@ export function virtualDisplayFor({ width, height, scale = 2 }) {
     const within = (w, h) => even(w * scale) * even(h * scale) <= MAX_PIXELS &&
                              even(w * scale) <= MAX_PIXEL_SIDE && even(h * scale) <= MAX_PIXEL_SIDE;
     // Not smaller than the smallest; then not more than the most, which wins
-    const grow = Math.max(1, MIN_WIDTH / width, MIN_HEIGHT / height);
+    const minHeight = scale > 1 ? MIN_HEIGHT_HIDPI : MIN_HEIGHT;
+    const grow = Math.max(1, MIN_WIDTH / width, minHeight / height);
     const pw = width * grow * scale;
     const ph = height * grow * scale;
     const fit = Math.min(1, Math.sqrt(MAX_PIXELS / (pw * ph)), MAX_PIXEL_SIDE / pw, MAX_PIXEL_SIDE / ph);

@@ -87,11 +87,11 @@ describe('Virtual display of a chosen size', () => {
     it('lets a shape that is not 16 to 9 be wider than 3840 or taller than 2160', () => {
         const tall = mode(virtualDisplayFor({ width: 1200, height: 1600, scale: 2 }));
         deepStrictEqual([tall.pixelWidth, tall.pixelHeight, tall.width, tall.height], [2400, 3200, 1200, 1600]);
-        const wide = mode(virtualDisplayFor({ width: 1950, height: 480, scale: 2 }));
-        deepStrictEqual([wide.pixelWidth, wide.pixelHeight, wide.width, wide.height], [3900, 960, 1950, 480]);
+        const wide = mode(virtualDisplayFor({ width: 2000, height: 600, scale: 2 }));
+        deepStrictEqual([wide.pixelWidth, wide.pixelHeight, wide.width, wide.height], [4000, 1200, 2000, 600]);
         // and makes room for it in the display
-        deepStrictEqual(virtualDisplayFor({ width: 1950, height: 480, scale: 2 }).largest,
-                        { pixelWidth: 3900, pixelHeight: 2160 });
+        deepStrictEqual(virtualDisplayFor({ width: 2000, height: 600, scale: 2 }).largest,
+                        { pixelWidth: 4000, pixelHeight: 2160 });
         deepStrictEqual(virtualDisplayFor({ width: 1200, height: 1600, scale: 2 }).largest,
                         { pixelWidth: 3840, pixelHeight: 3200 });
     });
@@ -101,11 +101,23 @@ describe('Virtual display of a chosen size', () => {
         deepStrictEqual([strip.pixelWidth, strip.width], [7680, 3840]);
     });
 
-    it('makes every dimension even and nothing smaller than 640x480', () => {
+    it('makes every dimension even', () => {
         const odd = mode(virtualDisplayFor({ width: 1365, height: 767, scale: 1 }));
         deepStrictEqual([odd.width, odd.height, odd.pixelWidth, odd.pixelHeight], [1366, 768, 1366, 768]);
-        const small = mode(virtualDisplayFor({ width: 320, height: 240, scale: 2 }));
-        deepStrictEqual([small.width, small.height, small.pixelWidth, small.pixelHeight], [640, 480, 1280, 960]);
+    });
+
+    // A Mac marks a smaller mode "unsupported" and uses 800x600 at 2 instead:
+    // seen for 1478x480 at 2. At 1 it took 1478x480.
+    it('asks for nothing smaller than a Mac will show, keeping the shape', () => {
+        const short2 = mode(virtualDisplayFor({ width: 1478, height: 480, scale: 2 }));
+        deepStrictEqual([short2.width, short2.height, short2.pixelWidth, short2.pixelHeight],
+                        [1662, 540, 3324, 1080]);
+        const short1 = mode(virtualDisplayFor({ width: 1478, height: 480, scale: 1 }));
+        deepStrictEqual([short1.width, short1.height], [1478, 480]);
+        const small2 = mode(virtualDisplayFor({ width: 320, height: 240, scale: 2 }));
+        deepStrictEqual([small2.width, small2.height, small2.pixelWidth, small2.pixelHeight], [800, 600, 1600, 1200]);
+        const small1 = mode(virtualDisplayFor({ width: 320, height: 240, scale: 1 }));
+        deepStrictEqual([small1.width, small1.height], [800, 600]);
     });
 
     // A window 1950 points wide and 480 high at 2 was sent as 3840 pixels for
