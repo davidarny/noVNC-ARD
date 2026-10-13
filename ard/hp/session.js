@@ -17,6 +17,7 @@ import { createContext } from './srtp.js';
 import { VideoAssembler } from './rtp-video.js';
 import { receiverReport, pictureAck, rateControl } from './feedback.js';
 import { extendSeq } from './seq.js';
+import { PAYLOAD_TYPE_HEVC } from './offer-template.js';
 
 // WebSocket subprotocol a relay's media endpoint answers to.
 export const MEDIA_SUBPROTOCOL = 'ard-media';
@@ -390,6 +391,12 @@ export class HpSession {
                 this.stats.audioPackets++;
                 this._audioSeq.update(rtp.seq);
                 if (this._audio) this._audio.push(rtp);
+                return;
+            }
+            if (rtp.payloadType !== PAYLOAD_TYPE_HEVC) {
+                // The offer lists a second video format because Apple's does;
+                // this viewer reads HEVC only.
+                this._fail('unsupported-video', 'payload type ' + rtp.payloadType);
                 return;
             }
             this.stats.videoPackets++;

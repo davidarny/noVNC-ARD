@@ -274,6 +274,10 @@
                 return 'this connection has no media channel';
             }
             if (ardMediaBusy) return 'another viewer is using it on this relay';
+            // Known once signed in: the Mac's ServerInit says whether to ask
+            if (UI.rfb && UI.rfb._ardServerInitSeen && !UI.rfb._ardHpOffered()) {
+                return 'this Mac does not offer it';
+            }
             if (ardHpDisabled) return 'it failed on the last attempt';
             return null;
         }
@@ -292,6 +296,7 @@
             'decoder': 'the video could not be decoded',
             'overloaded': 'this computer cannot keep up with it',
             'media-stopped': 'the Mac stopped sending it',
+            'unsupported-video': 'the Mac sent video this viewer does not read',
             'stalled': 'part of the picture was lost',
             'bad-message1': 'the Mac sent something unexpected',
             'bad-answer': 'the Mac sent something unexpected',

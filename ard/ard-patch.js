@@ -38,6 +38,7 @@ import { sessionCommand, sessionSelectAction } from './session-select.js';
 import { HpSession } from './hp/session.js';
 import { VideoSink } from './hp/video-sink.js';
 import { buildVirtualDisplayMessage, virtualDisplayFor } from './hp/virtual-display.js';
+import { offersHighPerformance } from './hp/capability.js';
 
 import {
     encodingArdHalftone,
@@ -355,6 +356,7 @@ RFB.prototype._negotiateServerInit = function () {
     }
 
     name = decodeUTF8(name, true);
+    this._ardServerInitSeen = true;     // what the server offers is known from here on
 
     Log.Info("ARD: Screen " + width + "x" + height + ", name: " + name);
 
@@ -1540,10 +1542,18 @@ RFB.prototype._handleRect = function () {
 
 // High Performance is asked for when the preset says so, the page has
 // confirmed the browser can decode it and told us where the media channel
-// is, and it has not already failed on this connection.
+// is, it has not already failed on this connection, and the server is one
+// to ask.
 RFB.prototype._ardHpWanted = function () {
     return this._ardQualityPreset === 'highperf' &&
-           !!this._ardHpAllowed && !!this._ardHpMediaUrl && !this._ardHpFailed;
+           !!this._ardHpAllowed && !!this._ardHpMediaUrl && !this._ardHpFailed &&
+           this._ardHpOffered();
+};
+
+// Whether this server is one to ask for High Performance, by its
+// ServerInit. Like Apple's viewers, this one does not ask an Intel Mac.
+RFB.prototype._ardHpOffered = function () {
+    return offersHighPerformance(this._ardCapabilityBitmap);
 };
 
 // High Performance normally runs on a virtual display the server creates
@@ -1551,17 +1561,12 @@ RFB.prototype._ardHpWanted = function () {
 // the server before SetEncodings. Without it the server sends its real
 // displays instead.
 //
-// That is before the server has shown that it knows High Performance, and
-// nothing in its ServerInit is known to say so. A server old enough to
-// send the plain ServerInit is certainly too old and is not sent the
-// request. What any other server without High Performance does with it is
-// not known; the page does not try again on a connection that ends early.
+// That is before the server has shown that it knows High Performance, so
+// the request goes only to a server whose ServerInit is that of the Macs
+// seen to send the mode (_ardHpOffered). The page does not try again on a
+// connection that ends early.
 RFB.prototype._ardHpRequestVirtualDisplay = function () {
     if (!this._ardHpWanted() || this._ardHpVirtualDisplay === false) return;
-    if (!this._ardCapabilityBitmap) {
-        Log.Info("ARD HP: plain ServerInit, not asking for a virtual display");
-        return;
-    }
     // _ardHpDisplay: { width, height, scale } to ask for a display of that
     // size; without it, the display Apple's viewer asks for
     const display = this._ardHpDisplay ? virtualDisplayFor(this._ardHpDisplay) : null;

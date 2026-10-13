@@ -446,6 +446,24 @@ describe('High Performance session', () => {
         strictEqual(session.state, 'streaming');
     });
 
+    it('ends at once on video that is not HEVC', async () => {
+        const keys = await negotiate();
+        const server = await createContext(keys.video.fromServer.key, keys.video.fromServer.salt);
+        // payload type 123, as an Intel Mac sends
+        const packet = new Uint8Array([
+            0x90, 0x80 | 123, ...u16(40), ...u32(0), ...u32(SERVER_VIDEO_SSRC),
+            0x93, 0x11, 0x00, 0x01, ...u16(1), ...u16(9),
+            0x3d, 0xc5, ...u16(0), 0x88, 0x84, 0x21,
+        ]);
+        ws.deliver(CHANNEL_VIDEO, await server.protectRtp(packet));
+        await until(() => session.state === 'failed', 'the failure');
+
+        strictEqual(states[states.length - 1], 'failed:unsupported-video');
+        strictEqual(session.failure, 'unsupported-video: payload type 123');
+        strictEqual(sinks[0].pictures.length, 0);
+        ok(sinks[0].closed);
+    });
+
     it('sends rate control every 50 ms and reports every second', async () => {
         const keys = await negotiate();
         const videoIn = await createContext(keys.video.fromServer.key, keys.video.fromServer.salt);
