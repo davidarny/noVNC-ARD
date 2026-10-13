@@ -434,7 +434,15 @@ describe('High Performance session', () => {
         // The sink reports its first frame: now streaming.
         sinks[0].opts.onFirstFrame();
         deepStrictEqual(states, ['offering', 'waiting', 'streaming']);
-        mock.timers.tick(6000);
+
+        // The limit for a first picture no longer applies. (Sound keeps
+        // arriving, as it does from a server that is still sending.)
+        const audio = await createContext(keys.audio.fromServer.key, keys.audio.fromServer.salt);
+        for (let seq = 0; seq < 3; seq++) {
+            ws.deliver(CHANNEL_AUDIO, await audio.protectRtp(audioPacket(seq)));
+            await until(() => session.stats.audioPackets === seq + 1, 'the audio packet');
+            mock.timers.tick(2400);
+        }
         strictEqual(session.state, 'streaming');
     });
 
@@ -602,6 +610,33 @@ describe('High Performance session', () => {
         pass(200);
         strictEqual(states[states.length - 1], 'failed:overloaded');
         ok(sinks[0].closed);
+    });
+
+    it('fails when the server stops sending, and not while sound still arrives', async () => {
+        const keys = await negotiate();
+        const audio = await createContext(keys.audio.fromServer.key, keys.audio.fromServer.salt);
+        sinks[0].opts.onFirstFrame();
+
+        // Nothing on the screen moves, but the sound packets keep coming.
+        for (let seq = 0; seq < 4; seq++) {
+            ws.deliver(CHANNEL_AUDIO, await audio.protectRtp(audioPacket(seq)));
+            await until(() => session.stats.audioPackets === seq + 1, 'the audio packet');
+            pass(2500);
+            strictEqual(session.state, 'streaming');
+        }
+
+        // Then nothing at all.
+        pass(600);
+        strictEqual(states[states.length - 1], 'failed:media-stopped');
+        ok(sinks[0].closed);
+    });
+
+    it('leaves a start without any packet to the first-picture limit', async () => {
+        await negotiate();
+        pass(4900);
+        strictEqual(session.state, 'waiting');
+        pass(200);
+        strictEqual(states[states.length - 1], 'failed:no-picture');
     });
 
     it('does not mind a backlog within what a decoder normally holds', async () => {

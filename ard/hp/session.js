@@ -42,6 +42,12 @@ const OVERLOAD_PICTURES = 120;
 const OVERLOAD_PACKETS = 2000;
 const OVERLOAD_MS = 2000;
 
+// The server sends sound a hundred times a second whether or not there is
+// any, so a few seconds without a single packet means it has stopped
+// sending, which a server may do without a word on the RFB connection. The
+// picture would stay as it was, looking alive.
+const MEDIA_SILENCE_MS = 3000;
+
 function isRtcp(packet) {
     return packet.length > 1 && packet[1] >= 192 && packet[1] <= 223;
 }
@@ -116,6 +122,7 @@ export class HpSession {
         this._audioSeq = new SeqTracker();
         this._videoSeq = new SeqTracker();
         this._lastVideoPacketAt = null;
+        this._lastMediaAt = null;                // last packet of either stream that verified
         this._lastSenderReport = [null, null];   // per channel: { middle, at }
         this._decrypting = 0;                    // packets handed to SRTP and not back yet
         this._overloadedSince = null;
@@ -387,6 +394,7 @@ export class HpSession {
             this._decrypting--;
             if (!rtp) { this.stats.authFailures++; return; }
             if (this.state === 'failed' || this.state === 'closed') return;
+            this._lastMediaAt = this._now();
             if (channel === CHANNEL_AUDIO) {
                 this.stats.audioPackets++;
                 this._audioSeq.update(rtp.seq);
@@ -453,6 +461,10 @@ export class HpSession {
         const now = this._now();
         if (this._assembler) this._assembler.tick(now);
         this._checkLoad(now);
+        if (this.state === 'streaming' && this._lastMediaAt !== null &&
+            now - this._lastMediaAt > MEDIA_SILENCE_MS) {
+            this._fail('media-stopped');
+        }
         if (!this._feedback.rateControl || this.state === 'failed') return;
         const sinceLast = this._lastVideoPacketAt === null ? 0 : now - this._lastVideoPacketAt;
         this._sendRtcp(CHANNEL_VIDEO, rateControl({
