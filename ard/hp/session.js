@@ -113,6 +113,8 @@ export class HpSession {
         this._ctx = null;           // { audioIn, audioOut, videoIn, videoOut }
         this._assembler = null;
         this._sink = null;
+        this._reoffering = false;   // a resize re-offer is in flight
+        this._pendingSecrets = null;
         this._timers = new Set();
         this._intervals = new Set();
         this._sendChain = [Promise.resolve(), Promise.resolve()];
@@ -293,9 +295,91 @@ export class HpSession {
             this._log('server ports: audio ' + ports.audioPort + ', video ' + ports.videoPort);
             return;
         }
+        // A re-offer sent during a session (a resize): swap the stream in
+        // without disturbing the picture on screen. Its failure is not the
+        // session's; the old stream stays.
+        if (this._reoffering && this.state === 'streaming') {
+            this._swapMedia(payload).catch((e) => {
+                this._log('resize failed: ' + (e && e.message ? e.message : e));
+                this._endReoffer();
+            });
+            return;
+        }
         if (this.state !== 'offering' || this._answering) return;
         this._answering = true;
         this._startMedia(payload).catch(e => this._fail('bad-answer', e.message));
+    }
+
+    // Ask the server for a new picture size on the open connection: send a
+    // fresh offer. The RFB layer has already sent the new VirtualDisplay
+    // (0x1d). The picture on screen stays until the new one is ready.
+    reoffer() {
+        if (this.state !== 'streaming' || this._reoffering) return;
+        this._reoffering = true;
+        this._pendingSecrets = generateSecrets();
+        buildOffer(this._pendingSecrets, { endpoint: this._endpoint }).then((offer) => {
+            if (!this._reoffering) return;
+            this._sendOffer(offer);
+            this._timeout(ANSWER_MS, () => {
+                if (this._reoffering) {
+                    this._log('resize: no answer');
+                    this._endReoffer();
+                }
+            });
+        }, (e) => { this._log('resize offer failed: ' + e.message); this._endReoffer(); });
+    }
+
+    _endReoffer() {
+        this._reoffering = false;
+        this._pendingSecrets = null;
+    }
+
+    // The server's answer to a resize re-offer: build the new stream and put
+    // it in place. The old sink stays until the new one has a picture.
+    async _swapMedia(payload) {
+        const answer = await parseAnswer(payload);
+        const secrets = this._pendingSecrets;
+        if (!secrets) return;
+        const audio = splitKeyBlock(secrets.audioKeys);
+        const video = splitKeyBlock(secrets.videoKeys);
+        const ctx = {
+            audioIn: await createContext(audio.fromServer.key, audio.fromServer.salt),
+            audioOut: await createContext(audio.toServer.key, audio.toServer.salt),
+            videoIn: await createContext(video.fromServer.key, video.fromServer.salt),
+            videoOut: await createContext(video.toServer.key, video.toServer.salt),
+        };
+        if (!this._reoffering || this.state !== 'streaming') return;
+
+        const oldSink = this._sink;
+        const assembler = new VideoAssembler({
+            baseSsrc: answer.video.ssrc,
+            stripes: answer.video.stripes,
+            onPicture: p => this._onPicture(p),
+            onStall: s => this._log('resize: waiting for picture ' + s.expectedDon),
+        });
+        const sink = this._createSink({
+            width: answer.video.width,
+            height: answer.video.height,
+            stripes: answer.video.stripes,
+            onFirstFrame: () => {
+                if (oldSink && oldSink !== this._sink) { /* already swapped */ }
+                if (oldSink) oldSink.close();
+            },
+            onError: reason => this._log('resize sink error: ' + reason),
+        });
+
+        // From here the new keys, streams and sink are the session's.
+        this._secrets = secrets;
+        this._ctx = ctx;
+        this._answer = answer;
+        this._assembler = assembler;
+        this._sink = sink;
+        this._audioSeq = new SeqTracker();
+        this._videoSeq = new SeqTracker();
+        this._lastSenderReport = [null, null];
+        this._endReoffer();
+        this._log('resized to ' + answer.video.width + 'x' + answer.video.height +
+                  ', ' + answer.video.stripes + ' stripes');
     }
 
     async _startMedia(payload) {

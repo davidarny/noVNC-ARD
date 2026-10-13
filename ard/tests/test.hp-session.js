@@ -103,6 +103,33 @@ async function answer() {
     return new Uint8Array([...u16(body.length), ...body]);
 }
 
+// An answer with chosen SSRCs and picture size, for a re-offer.
+async function answerWith({ audioSsrc, videoSsrc, width, height, stripes }) {
+    const audio = await answerStream([
+        { field: 3, value: protobuf.encode([{ field: 1, value: audioSsrc }]) },
+    ]);
+    const video = await answerStream([
+        { field: 5, value: protobuf.encode([
+            { field: 1, value: videoSsrc },
+            { field: 4, value: width },
+            { field: 5, value: height },
+            { field: 6, value: stripes },
+        ]) },
+    ]);
+    const body = [
+        ...u16(2), ...u16(2), 0, 0, 0, 1,
+        ...u16(audio.length), ...u16(video.length), 0, 0, 0, 0, 0, 0,
+        ...audio, ...video,
+    ];
+    return new Uint8Array([...u16(body.length), ...body]);
+}
+
+// The server's ports notice (rectangle 1010, field 0001), which precedes a
+// negotiation.
+const PORTS_NOTICE = new Uint8Array([
+    0x00, 0x24, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x17, 0x0c, 0x00, 0x00, 0x00, 0x01,
+    0x17, 0x0d, 0x00, 0x00, 0x00, 0x01, ...new Array(16).fill(0)]);
+
 // The key blocks out of a 0x1c message.
 function keysFromOffer(offer) {
     const view = new DataView(offer.buffer, offer.byteOffset);
@@ -687,6 +714,83 @@ describe('High Performance session', () => {
         ready(audio);
         await settle();
         ok(audio.closed);
+    });
+
+    // ----- resize without reconnecting -----
+
+    // Bring a session to 'streaming'.
+    async function stream() {
+        const keys = await negotiate();
+        sinks[0].opts.onFirstFrame();
+        strictEqual(session.state, 'streaming');
+        return keys;
+    }
+
+    it('re-offers on resize, keeping the picture until the new one is ready', async () => {
+        await stream();
+        session.reoffer();
+        await until(() => offers.length === 2, 'the second offer');
+        strictEqual(offers[1][0], 0x1c);
+        // The session is still streaming the old picture.
+        strictEqual(session.state, 'streaming');
+        strictEqual(sinks.length, 1);
+        ok(!sinks[0].closed);
+
+        // The ports notice comes first and is not the answer.
+        session.handleAnswer(PORTS_NOTICE);
+        await settle();
+        strictEqual(sinks.length, 1);
+
+        // The answer: a new sink at the new size, the old one still open.
+        session.handleAnswer(await answerWith({
+            audioSsrc: 0x11112222, videoSsrc: 0x33334444, width: 2560, height: 1440, stripes: 4 }));
+        await until(() => sinks.length === 2, 'the new sink');
+        strictEqual(sinks[1].opts.width, 2560);
+        strictEqual(sinks[1].opts.height, 1440);
+        ok(!sinks[0].closed, 'old sink stays until the new picture');
+        strictEqual(session.state, 'streaming');
+
+        // The new picture arrives: the old sink is closed.
+        sinks[1].opts.onFirstFrame();
+        ok(sinks[0].closed, 'old sink closed on the new first frame');
+        strictEqual(session.state, 'streaming');
+    });
+
+    it('routes media to the new stream after a resize', async () => {
+        await stream();
+        session.reoffer();
+        await until(() => offers.length === 2, 'the second offer');
+        const keys = keysFromOffer(offers[1]);
+        session.handleAnswer(await answerWith({
+            audioSsrc: 0x11112222, videoSsrc: 0x33334444, width: 2560, height: 1440, stripes: 4 }));
+        await until(() => sinks.length === 2, 'the new sink');
+        sinks[1].opts.onFirstFrame();
+
+        const server = await createContext(keys.video.fromServer.key, keys.video.fromServer.salt);
+        const p0 = await server.protectRtp(keyPicturePacket({ stripe: 0, seq: 100, don: 1000, frame: 7 }));
+        const before = session.stats.videoPackets;
+        ws.deliver(CHANNEL_VIDEO, p0);
+        await until(() => session.stats.videoPackets === before + 1, 'the packet on the new keys');
+        ok(sinks[1].pictures.length >= 0);
+    });
+
+    it('does not re-offer unless it is streaming', async () => {
+        await negotiate();          // 'waiting', not yet streaming
+        session.reoffer();
+        await settle();
+        strictEqual(offers.length, 1);
+    });
+
+    it('keeps the old stream when a re-offer is not answered well', async () => {
+        await stream();
+        session.reoffer();
+        await until(() => offers.length === 2, 'the second offer');
+        session.handleAnswer(new Uint8Array([0, 30, ...new Array(30).fill(7)]));
+        await settle();
+        // The session did not fail; the old picture is still there.
+        strictEqual(session.state, 'streaming');
+        ok(!sinks[0].closed);
+        strictEqual(sinks.length, 1);
     });
 
     it('closes quietly', async () => {
