@@ -106,7 +106,7 @@ export class HpSession {
         this.state = 'idle';
         this.failure = null;
         this.stats = {
-            videoPackets: 0, videoBytes: 0, audioPackets: 0, rtcpPackets: 0,
+            videoPackets: 0, videoBytes: 0, audioPackets: 0, audioBytes: 0, rtcpPackets: 0,
             authFailures: 0, pictures: 0, keyPictures: 0, sent: 0,
         };
 
@@ -531,6 +531,7 @@ export class HpSession {
             this._lastMediaAt = this._now();
             if (channel === CHANNEL_AUDIO) {
                 this.stats.audioPackets++;
+                this.stats.audioBytes += rtp.payload.length;
                 this._audioSeq.update(rtp.seq);
                 if (this._audio) this._audio.push(rtp);
                 return;

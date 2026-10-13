@@ -501,17 +501,22 @@
                 if (!s || !s.video) return;
                 const now = performance.now();
                 let rate = '';
+                let akbit = '';
                 if (last) {
                     const dt = (now - last.at) / 1000;
                     const mbit = (s.stats.videoBytes - last.bytes) * 8 / 1e6 / dt;
                     const pics = (s.stats.pictures - last.pictures) / dt;
                     rate = ' · ' + mbit.toFixed(1) + ' Mbit/s · ' + Math.round(pics) + ' pictures/s';
+                    const akb = (s.stats.audioBytes - last.audioBytes) * 8 / 1e3 / dt;
+                    akbit = ' · ' + Math.round(akb) + ' kbit/s';
                 }
-                last = { at: now, bytes: s.stats.videoBytes, pictures: s.stats.pictures };
+                last = { at: now, bytes: s.stats.videoBytes, pictures: s.stats.pictures,
+                         audioBytes: s.stats.audioBytes };
                 document.getElementById('ard_info_video').textContent =
                     'HEVC ' + s.video.width + '×' + s.video.height + rate;
                 document.getElementById('ard_info_audio').textContent =
-                    !ardHpAudio ? 'Off' : !s.audioReady ? 'Not available' : ardAudioMuted ? 'Muted' : 'On';
+                    !ardHpAudio ? 'Off' : !s.audioReady ? 'Not available' :
+                    (ardAudioMuted ? 'Muted' : 'On') + akbit;
             };
             for (const id of ['ard_info_video_row', 'ard_info_audio_row']) {
                 document.getElementById(id).classList.remove('noVNC_hidden');
