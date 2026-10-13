@@ -1610,6 +1610,15 @@ RFB.prototype._ardHpResize = function (display) {
     return true;
 };
 
+// Soften the held picture while the new size is on its way, the way Apple's
+// viewer does, and clear it when the new picture arrives.
+RFB.prototype._ardHpResizeVisual = function (active) {
+    const canvas = this._canvas;
+    if (!canvas) return;
+    canvas.style.transition = 'filter 0.18s ease';
+    canvas.style.filter = active ? 'blur(8px) brightness(0.72)' : '';
+};
+
 // The session is on a virtual display: one this viewer asked the server to
 // make, or the virtual display login the server offered.
 RFB.prototype.ardOnVirtualDisplay = function () {
@@ -1648,6 +1657,7 @@ RFB.prototype._ardHpStart = function () {
         createAudio: this._ardHpAudio === false ? null
             : () => import('./hp/audio.js').then(m => m.AudioPipeline.create()),
         onState: (state, reason) => this._ardHpOnState(state, reason),
+        onResize: active => this._ardHpResizeVisual(active),
         log: msg => Log.Info("ARD HP: " + msg),
     });
     this._ardHp.start();

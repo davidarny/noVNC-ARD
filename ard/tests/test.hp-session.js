@@ -238,18 +238,20 @@ describe('Overlay geometry', () => {
 });
 
 describe('High Performance session', () => {
-    let states, offers, sinks, session, ws;
+    let states, offers, sinks, session, ws, resizes;
 
     function create(extra = {}) {
         states = [];
         offers = [];
         sinks = [];
+        resizes = [];
         session = new HpSession(Object.assign({
             mediaUrl: 'ws://relay.test/media',
             WebSocketImpl: FakeWebSocket,
             now: () => Date.now(),
             sendOffer: bytes => offers.push(bytes),
             onState: (state, reason) => states.push(reason ? state + ':' + reason : state),
+            onResize: (active) => resizes.push(active),
             createSink: (opts) => {
                 const sink = { opts, pictures: [], closed: false,
                                push(p) { this.pictures.push(p); }, close() { this.closed = true; } };
@@ -772,6 +774,29 @@ describe('High Performance session', () => {
         ws.deliver(CHANNEL_VIDEO, p0);
         await until(() => session.stats.videoPackets === before + 1, 'the packet on the new keys');
         ok(sinks[1].pictures.length >= 0);
+    });
+
+    it('signals a resize while the new picture is on the way, and when it arrives', async () => {
+        await stream();
+        session.reoffer();
+        await until(() => offers.length === 2, 'the second offer');
+        deepStrictEqual(resizes, [true]);          // dim on
+        session.handleAnswer(await answerWith({
+            audioSsrc: 0x11112222, videoSsrc: 0x33334444, width: 2560, height: 1440, stripes: 4 }));
+        await until(() => sinks.length === 2, 'the new sink');
+        deepStrictEqual(resizes, [true]);          // still dimmed: no picture yet
+        sinks[1].opts.onFirstFrame();
+        deepStrictEqual(resizes, [true, false]);   // dim off when the picture shows
+    });
+
+    it('clears the resize signal if the re-offer is abandoned', async () => {
+        await stream();
+        session.reoffer();
+        await until(() => offers.length === 2, 'the second offer');
+        deepStrictEqual(resizes, [true]);
+        mock.timers.tick(5000);                    // no answer
+        deepStrictEqual(resizes, [true, false]);
+        strictEqual(session.state, 'streaming');
     });
 
     it('does not re-offer unless it is streaming', async () => {

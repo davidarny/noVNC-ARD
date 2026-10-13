@@ -83,7 +83,7 @@ export class HpSession {
      * endpoint:        how the viewer describes itself in the offer
      */
     constructor({ mediaUrl, sendOffer, holdOffer, createSink, createAudio, audioMuted, onState,
-                  feedback, endpoint, WebSocketImpl, now, log }) {
+                  onResize, feedback, endpoint, WebSocketImpl, now, log }) {
         this._mediaUrl = mediaUrl;
         this._sendOffer = sendOffer;
         this._offerHeld = !!holdOffer;
@@ -92,6 +92,7 @@ export class HpSession {
         this._audio = null;
         this._audioMuted = !!audioMuted;
         this._onState = onState || (() => {});
+        this._onResize = onResize || (() => {});
         this._feedback = Object.assign({ reports: true, acks: true, rateControl: true }, feedback);
         this._endpoint = endpoint;
         this._WebSocket = WebSocketImpl || globalThis.WebSocket;
@@ -115,6 +116,7 @@ export class HpSession {
         this._sink = null;
         this._reoffering = false;   // a resize re-offer is in flight
         this._pendingSecrets = null;
+        this._resizeSignalled = false;  // onResize(true) sent, onResize(false) owed
         this._timers = new Set();
         this._intervals = new Set();
         this._sendChain = [Promise.resolve(), Promise.resolve()];
@@ -203,6 +205,9 @@ export class HpSession {
             this._audio = null;
         }
         this._torn = true;
+        this._reoffering = false;
+        this._pendingSecrets = null;
+        this._resizeDone();
         if (this._ws) {
             const ws = this._ws;
             this._ws = null;
@@ -302,6 +307,7 @@ export class HpSession {
             this._swapMedia(payload).catch((e) => {
                 this._log('resize failed: ' + (e && e.message ? e.message : e));
                 this._endReoffer();
+                this._resizeDone();
             });
             return;
         }
@@ -316,6 +322,7 @@ export class HpSession {
     reoffer() {
         if (this.state !== 'streaming' || this._reoffering) return;
         this._reoffering = true;
+        if (!this._resizeSignalled) { this._resizeSignalled = true; this._onResize(true); }
         this._pendingSecrets = generateSecrets();
         buildOffer(this._pendingSecrets, { endpoint: this._endpoint }).then((offer) => {
             if (!this._reoffering) return;
@@ -324,14 +331,20 @@ export class HpSession {
                 if (this._reoffering) {
                     this._log('resize: no answer');
                     this._endReoffer();
+                    this._resizeDone();
                 }
             });
-        }, (e) => { this._log('resize offer failed: ' + e.message); this._endReoffer(); });
+        }, (e) => { this._log('resize offer failed: ' + e.message); this._endReoffer(); this._resizeDone(); });
     }
 
     _endReoffer() {
         this._reoffering = false;
         this._pendingSecrets = null;
+    }
+
+    // The resize is over, by a new picture or by giving up: clear the dim.
+    _resizeDone() {
+        if (this._resizeSignalled) { this._resizeSignalled = false; this._onResize(false); }
     }
 
     // The server's answer to a resize re-offer: build the new stream and put
@@ -362,8 +375,8 @@ export class HpSession {
             height: answer.video.height,
             stripes: answer.video.stripes,
             onFirstFrame: () => {
-                if (oldSink && oldSink !== this._sink) { /* already swapped */ }
                 if (oldSink) oldSink.close();
+                this._resizeDone();
             },
             onError: reason => this._log('resize sink error: ' + reason),
         });
