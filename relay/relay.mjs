@@ -7,6 +7,11 @@
  * them and keeps no session state.
  *
  * Run: node relay/relay.mjs --listen 6088 --target HOST[:5900] [--web DIR] [--host 127.0.0.1]
+ *
+ * A WebSocket is a way into the target, so a web page may open one only if
+ * it was served by this relay (see originAllowed). Run the relay where only
+ * the people meant to reach the target can reach it: it does not ask who
+ * they are.
  */
 
 import http from 'node:http';
@@ -16,21 +21,35 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import dns from 'node:dns';
+import os from 'node:os';
 import { pipeline } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const USAGE = `usage: node relay/relay.mjs --listen PORT --target HOST[:PORT] [--web DIR] [--host ADDRESS]
+                             [--allow-origin ORIGIN]...
 
   --listen PORT         HTTP and WebSocket port
   --target HOST[:PORT]  the Mac to relay to; PORT is its TCP port (default 5900)
   --web DIR             directory of static files to serve (default: the repository root)
   --host ADDRESS        address to listen on (default 127.0.0.1)
+  --allow-origin ORIGIN another web origin whose pages may connect, for example
+                        https://viewer.example.com; may be given more than once
+
+Pages served by the relay itself may always connect, when opened by IP
+address, as localhost or under this machine's own name.
 
 UDP ports 5900 and 5901 are bound on all addresses for the media bridge.`;
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+
+// The media endpoint and the subprotocol only it agrees to
+const MEDIA_PATH = '/media';
+const MEDIA_SUBPROTOCOL = 'ard-media';
+// Path segments that are never served, as dotfiles are not: local notes
+// that live in the repository directory without being part of it
+const UNSERVED_SEGMENTS = new Set(['private', 'node_modules']);
 
 const OP_CONTINUATION = 0x0;
 const OP_TEXT = 0x1;
@@ -307,8 +326,53 @@ function refuseUpgrade(socket, status, extraHeader = '') {
     socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n${extraHeader}\r\n`);
 }
 
-// Answer the opening handshake. Returns the connection, or null if refused.
-function acceptWebSocket(req, socket, maxMessage) {
+// The subprotocols a client offers, in its order of preference.
+function offeredProtocols(req) {
+    return String(req.headers['sec-websocket-protocol'] || '')
+        .split(',').map(name => name.trim()).filter(Boolean);
+}
+
+// The host of a Host header or URL authority, without port or brackets.
+function hostnameOf(authority) {
+    try {
+        return new URL('http://' + authority).hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    } catch {
+        return null;
+    }
+}
+
+/*
+ * May the page that sent this upgrade request use the relay?
+ *
+ * Browsers name the page's origin in every WebSocket handshake and let any
+ * page connect anywhere, so without this check any site open in the user's
+ * browser could reach the target through a relay on localhost.
+ *
+ * Allowed: no Origin at all (not a browser page), an origin listed with
+ * --allow-origin, and the relay's own pages. A page is the relay's own when
+ * its origin is the host the request was sent to, and that host is an IP
+ * address, localhost or one of this machine's names. The last condition is
+ * what stops a foreign site that points its own name at the relay's address.
+ */
+function originAllowed(req, allowOrigins, ownNames) {
+    const origin = req.headers.origin;
+    if (origin === undefined) return true;
+    if (allowOrigins.has(origin.toLowerCase())) return true;
+    let originHost;
+    try {
+        originHost = new URL(origin).host.toLowerCase();
+    } catch {
+        return false;
+    }
+    const host = String(req.headers.host || '').toLowerCase();
+    if (!host || originHost !== host) return false;
+    const name = hostnameOf(host);
+    return name !== null && (net.isIP(name) !== 0 || ownNames.has(name));
+}
+
+// Answer the opening handshake, agreeing to `protocol` if one is given.
+// Returns the connection, or null if refused.
+function acceptWebSocket(req, socket, maxMessage, protocol) {
     const key = req.headers['sec-websocket-key'];
     const upgrade = String(req.headers.upgrade || '').toLowerCase();
     if (req.method !== 'GET' || upgrade !== 'websocket' || !key) {
@@ -326,11 +390,7 @@ function acceptWebSocket(req, socket, maxMessage) {
         'Connection: Upgrade',
         `Sec-WebSocket-Accept: ${crypto.createHash('sha1').update(key + WS_GUID).digest('base64')}`,
     ];
-    const offered = String(req.headers['sec-websocket-protocol'] || '')
-        .split(',').map(name => name.trim()).filter(Boolean);
-    if (offered.length) {
-        lines.push(`Sec-WebSocket-Protocol: ${offered.includes('binary') ? 'binary' : offered[0]}`);
-    }
+    if (protocol) lines.push(`Sec-WebSocket-Protocol: ${protocol}`);
     socket.write(lines.join('\r\n') + '\r\n\r\n');
     return new WsConnection(socket, maxMessage);
 }
@@ -361,9 +421,11 @@ function serveStatic(webRoot, req, res) {
         return;
     }
     // Decoding can produce "..", so containment is checked on the resolved
-    // path. Dot segments and dotfiles (.git and the like) are never served.
+    // path. Dot segments, dotfiles (.git and the like) and local notes are
+    // never served; names are compared without case, as file systems may.
     const file = path.resolve(webRoot, '.' + pathname);
-    const hidden = pathname.split(/[/\\]/).some(segment => segment.startsWith('.'));
+    const hidden = pathname.split(/[/\\]/).some(segment =>
+        segment.startsWith('.') || UNSERVED_SEGMENTS.has(segment.toLowerCase()));
     if (pathname.includes('\0') || hidden || !file.startsWith(webRoot + path.sep)) {
         reply(res, 404, 'Not Found\n');
         return;
@@ -397,6 +459,7 @@ function serveStatic(webRoot, req, res) {
  *   targetHost        the machine to relay to (required)
  *   targetPort        its TCP port (5900)
  *   web               directory of static files (the repository root)
+ *   allowOrigins      further web origins whose pages may connect ([])
  *   udpPorts          the target's UDP port for each media channel ([5900, 5901])
  *   udpLocalPorts     the local UDP port for each channel (same as udpPorts)
  *   log               function taking one line (console.log)
@@ -410,6 +473,7 @@ export async function startRelay(options = {}) {
         targetHost,
         targetPort = 5900,
         web = REPO_ROOT,
+        allowOrigins = [],
         udpPorts = [5900, 5901],
         udpLocalPorts = udpPorts,
         log = console.log,
@@ -420,6 +484,11 @@ export async function startRelay(options = {}) {
     if (udpLocalPorts.length !== udpPorts.length) {
         throw new Error('udpLocalPorts and udpPorts must list the same number of channels');
     }
+    const allowedOrigins = new Set(allowOrigins.map(origin => origin.toLowerCase()));
+    // Names a browser on this network may know this machine by
+    const machine = os.hostname().toLowerCase();
+    const ownNames = new Set(['localhost', machine, machine.replace(/\.local$/, '') + '.local']);
+    if (!net.isIP(host)) ownNames.add(host.toLowerCase());
     const webRoot = path.resolve(web);
     if (!fs.statSync(webRoot, { throwIfNoEntry: false })?.isDirectory()) {
         throw new Error(`web directory not found: ${webRoot}`);
@@ -497,6 +566,13 @@ export async function startRelay(options = {}) {
             channels[n].inBytes += datagram.length;
         });
     });
+
+    // There is one pair of UDP ports, so one media client: the newest. A
+    // viewer that only wants to know whether the endpoint is here, and
+    // whether it is in use, asks with ?probe and is not attached.
+    function answerProbe(ws) {
+        ws.close(1000, media ? 'busy' : 'free');
+    }
 
     function attachMedia(ws, peer) {
         if (media) media.close(1000, 'Replaced by a new media client');
@@ -596,21 +672,41 @@ export async function startRelay(options = {}) {
     });
 
     server.on('upgrade', (req, socket, head) => {
-        let pathname;
+        let url;
         try {
-            pathname = new URL(req.url, 'http://relay').pathname;
+            url = new URL(req.url, 'http://relay');
         } catch {
             refuseUpgrade(socket, '400 Bad Request');
             return;
         }
-        const isMedia = pathname === '/media';
-        const ws = acceptWebSocket(req, socket, isMedia ? MAX_MEDIA_MESSAGE : MAX_TCP_MESSAGE);
-        if (!ws) return;
         const peer = `${socket.remoteAddress}:${socket.remotePort}`;
-        if (isMedia) {
-            attachMedia(ws, peer);
-        } else {
+        if (!originAllowed(req, allowedOrigins, ownNames)) {
+            log(`http: refused a WebSocket from ${peer}, origin ${req.headers.origin}`);
+            refuseUpgrade(socket, '403 Forbidden');
+            return;
+        }
+
+        // Only the media endpoint agrees to the media subprotocol, which is
+        // how a viewer tells it from the bridge, and from any plain proxy.
+        const isMedia = url.pathname === MEDIA_PATH;
+        const offered = offeredProtocols(req);
+        const wantsMedia = offered.includes(MEDIA_SUBPROTOCOL);
+        if (wantsMedia && !isMedia) {
+            refuseUpgrade(socket, '404 Not Found');
+            return;
+        }
+        const protocol = wantsMedia ? MEDIA_SUBPROTOCOL
+            : isMedia ? null
+                : offered.includes('binary') ? 'binary' : offered[0];
+
+        const ws = acceptWebSocket(req, socket, isMedia ? MAX_MEDIA_MESSAGE : MAX_TCP_MESSAGE, protocol);
+        if (!ws) return;
+        if (!isMedia) {
             bridgeTcp(ws, peer);
+        } else if (url.searchParams.has('probe')) {
+            answerProbe(ws);
+        } else {
+            attachMedia(ws, peer);
         }
         ws.receive(head);
     });
@@ -666,7 +762,7 @@ function parseArgs(argv) {
     for (let i = 0; i < argv.length; i += 2) {
         const flag = argv[i];
         const value = argv[i + 1];
-        if (!['--listen', '--target', '--web', '--host'].includes(flag)) {
+        if (!['--listen', '--target', '--web', '--host', '--allow-origin'].includes(flag)) {
             throw new Error(`unknown argument ${flag}`);
         }
         if (value === undefined) throw new Error(`${flag} needs a value`);
@@ -680,6 +776,15 @@ function parseArgs(argv) {
             if (parts[2] !== undefined) options.targetPort = parsePort(parts[2], flag);
         } else if (flag === '--web') {
             options.web = value;
+        } else if (flag === '--allow-origin') {
+            let origin;
+            try {
+                origin = new URL(value).origin;
+            } catch {
+                origin = 'null';
+            }
+            if (origin === 'null') throw new Error(`--allow-origin: "${value}" is not an origin like https://host:port`);
+            (options.allowOrigins = options.allowOrigins || []).push(origin);
         } else {
             options.host = value;
         }

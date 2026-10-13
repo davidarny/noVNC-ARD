@@ -145,7 +145,9 @@ Requirements:
 
 - A browser that decodes HEVC 4:4:4 through WebCodecs. Chrome, Edge and Safari on Apple silicon do; Firefox does not. Otherwise the page connects as `adaptive`.
 - The relay must be reachable from the Mac on UDP 5900 and 5901, and those ports must be free on the relay's machine.
-- One High Performance session per relay.
+- One High Performance session per relay: the newest takes the media. The session dialog says when another viewer is using it.
+
+Who may use the relay: it asks nobody who they are, so run it where only the people meant to reach the Mac can reach it (by default it listens on `127.0.0.1`). A web page may connect only if the relay served it, opened by IP address, as `localhost` or under the relay machine's own name, so that other sites open in the same browser cannot reach the Mac through it. To let a page served from somewhere else connect, name its origin: `--allow-origin https://viewer.example.com` (may be repeated). Clients that are not web pages are not restricted. Directories named `private` or `node_modules`, and dotfiles, are never served.
 
 The mode is chosen when the connection is made. If it cannot start, the page logs the reason and reconnects as `adaptive`. The picture is drawn at the display's pixel resolution on a canvas laid over noVNC's own, which keeps handling input and the cursor.
 

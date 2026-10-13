@@ -80,7 +80,7 @@ function clientFrame(opcode, payload, fin = true) {
 // Minimal WebSocket client (Node 20 has no global WebSocket). Written apart
 // from the relay's own framing code so the two check each other.
 class Client {
-    static connect(port, urlPath = '/websockify', extraHeaders = '') {
+    static connect(port, urlPath = '/websockify', extraHeaders = '', host = `127.0.0.1:${port}`) {
         return within(new Promise((resolve, reject) => {
             const socket = net.connect(port, '127.0.0.1');
             const key = crypto.randomBytes(16).toString('base64');
@@ -88,7 +88,7 @@ class Client {
             socket.setNoDelay(true);
             socket.on('error', reject);
             socket.on('connect', () => {
-                socket.write(`GET ${urlPath} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\n` +
+                socket.write(`GET ${urlPath} HTTP/1.1\r\nHost: ${host}\r\n` +
                              'Upgrade: websocket\r\nConnection: Upgrade\r\n' +
                              `Sec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n` +
                              `${extraHeaders}\r\n`);
@@ -280,8 +280,8 @@ describe('relay', () => {
     let tmp, web, target, echo, relay;
     const clients = [];
 
-    async function connect(urlPath, extraHeaders) {
-        const client = await Client.connect(relay.port, urlPath, extraHeaders);
+    async function connect(urlPath, extraHeaders, host) {
+        const client = await Client.connect(relay.port, urlPath, extraHeaders, host);
         clients.push(client);
         return client;
     }
@@ -303,6 +303,8 @@ describe('relay', () => {
         fs.writeFileSync(path.join(web, 'app.js'), 'export const answer = 42;\n');
         fs.writeFileSync(path.join(web, 'sub', 'data.json'), '{"a":1}');
         fs.writeFileSync(path.join(web, '.hidden'), 'dotfile');
+        fs.mkdirSync(path.join(web, 'private'));
+        fs.writeFileSync(path.join(web, 'private', 'notes.md'), 'local notes');
         for (const name of ['a.html', 'a.mjs', 'a.css', 'a.svg', 'a.png', 'a.ico', 'a.wasm', 'a.bin']) {
             fs.writeFileSync(path.join(web, name), 'x');
         }
@@ -314,6 +316,7 @@ describe('relay', () => {
             targetHost: '127.0.0.1',
             targetPort: target.port,
             web,
+            allowOrigins: ['https://viewer.example'],
             udpPorts: echo.map(e => e.port),
             udpLocalPorts: [0, 0],
             log: quiet,
@@ -420,6 +423,12 @@ describe('relay', () => {
 
         it('does not serve dotfiles', async () => {
             strictEqual((await httpRequest(relay.port, 'GET', '/.hidden')).status, 404);
+        });
+
+        it('does not serve local notes, however the name is cased', async () => {
+            strictEqual((await httpRequest(relay.port, 'GET', '/private/notes.md')).status, 404);
+            strictEqual((await httpRequest(relay.port, 'GET', '/Private/notes.md')).status, 404);
+            strictEqual((await httpRequest(relay.port, 'GET', '/sub/../private/notes.md')).status, 404);
         });
 
         it('refuses methods other than GET and HEAD', async () => {
@@ -586,6 +595,69 @@ describe('relay', () => {
             const client = await connect('/websockify');
             strictEqual(client.headers['sec-websocket-protocol'], undefined);
         });
+
+        it('refuses a media client, without calling the target', async () => {
+            await sleep(50);    // calls made by earlier tests have arrived
+            const calls = target.connections.length;
+            await rejects(connect('/websockify', 'Sec-WebSocket-Protocol: ard-media\r\n'), /404/);
+            await rejects(connect('/medi', 'Sec-WebSocket-Protocol: ard-media, binary\r\n'), /404/);
+            await sleep(50);
+            strictEqual(target.connections.length, calls);
+        });
+    });
+
+    // ===================================================================
+    //  Who may connect
+    // ===================================================================
+    describe('origin check', () => {
+        // The media probe is used where a connection is expected: it opens
+        // nothing at the target and closes by itself.
+        const probe = (origin, host) =>
+            connect('/media?probe', origin === null ? '' : `Origin: ${origin}\r\n`, host);
+
+        it('accepts a client that names no origin', async () => {
+            await (await probe(null)).whenClosed();
+        });
+
+        it('accepts its own pages, by address and as localhost', async () => {
+            await (await probe(`http://127.0.0.1:${relay.port}`)).whenClosed();
+            await (await probe(`http://localhost:${relay.port}`, `localhost:${relay.port}`)).whenClosed();
+            await (await probe(`http://LOCALHOST:${relay.port}`, `localhost:${relay.port}`)).whenClosed();
+            await (await probe(`http://[::1]:${relay.port}`, `[::1]:${relay.port}`)).whenClosed();
+        });
+
+        it('accepts its own pages under the machine name', async () => {
+            const name = os.hostname().toLowerCase();
+            await (await probe(`http://${name}:${relay.port}`, `${name}:${relay.port}`)).whenClosed();
+        });
+
+        it('accepts an origin it was told to allow', async () => {
+            await (await probe('https://viewer.example')).whenClosed();
+        });
+
+        it('refuses another site, on both endpoints, without calling the target', async () => {
+            await sleep(50);    // calls made by earlier tests have arrived
+            const calls = target.connections.length;
+            const foreign = 'Origin: https://elsewhere.example\r\n';
+            await rejects(connect('/websockify', foreign), /403/);
+            await rejects(connect('/media', foreign), /403/);
+            await rejects(connect('/media?probe', foreign), /403/);
+            await rejects(connect('/websockify', 'Origin: null\r\n'), /403/);
+            await rejects(connect('/websockify', 'Origin: nonsense\r\n'), /403/);
+            await sleep(50);
+            strictEqual(target.connections.length, calls);
+        });
+
+        it('refuses a page on another port of the same host', async () => {
+            await rejects(connect('/websockify', `Origin: http://127.0.0.1:${relay.port + 1}\r\n`), /403/);
+        });
+
+        it('refuses a foreign name pointed at the relay', async () => {
+            // The page's origin and the Host header agree, as they do when
+            // a site resolves its own name to this machine.
+            const host = `rebound.example:${relay.port}`;
+            await rejects(connect('/websockify', `Origin: http://${host}\r\n`, host), /403/);
+        });
     });
 
     // ===================================================================
@@ -599,6 +671,33 @@ describe('relay', () => {
             client.raw(clientFrame(0x8, code));
             await client.whenClosed();
         }
+
+        it('agrees to the media subprotocol and to no other', async () => {
+            const media = await connect('/media', 'Sec-WebSocket-Protocol: ard-media\r\n');
+            strictEqual(media.headers['sec-websocket-protocol'], 'ard-media');
+            await hangUp(media);
+            const other = await connect('/media', 'Sec-WebSocket-Protocol: binary\r\n');
+            strictEqual(other.headers['sec-websocket-protocol'], undefined);
+            await hangUp(other);
+        });
+
+        it('answers a probe without attaching it', async () => {
+            const free = await connect('/media?probe', 'Sec-WebSocket-Protocol: ard-media\r\n');
+            strictEqual(free.headers['sec-websocket-protocol'], 'ard-media');
+            deepStrictEqual(await free.whenClosed(), { code: 1000, reason: 'free' });
+
+            const viewer = await connect('/media');
+            await viewer.ping();
+            const busy = await connect('/media?probe=1');
+            deepStrictEqual(await busy.whenClosed(), { code: 1000, reason: 'busy' });
+
+            // The viewer that was there still has the media
+            await viewer.ping();
+            echo[1].sendTo(relay.udpLocalPorts[1], Buffer.from('picture'));
+            deepStrictEqual(await viewer.messages.take(),
+                            Buffer.concat([Buffer.from([1]), Buffer.from('picture')]));
+            await hangUp(viewer);
+        });
 
         for (const n of [0, 1]) {
             it(`round trips a datagram on channel ${n}`, async () => {
@@ -781,6 +880,7 @@ describe('relay', () => {
                 ['--listen', '6088', '--target', '127.0.0.1:99999'],
                 ['--listen', '6088', '--target', '127.0.0.1', '--bogus', '1'],
                 ['--listen', '6088', '--target'],
+                ['--listen', '6088', '--target', '127.0.0.1', '--allow-origin', 'viewer.example'],
             ];
             for (const args of cases) {
                 const run = spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', timeout: 10000 });
