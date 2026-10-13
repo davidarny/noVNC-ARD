@@ -1594,7 +1594,6 @@ RFB.prototype._ardHpStart = function () {
         holdOffer,
         feedback: this._ardHpFeedback,
         endpoint: this._ardHpEndpoint,
-        codecs: this._ardHpCodecs,
         sendOffer: bytes => RFB.messages.ardMediaStreamNegotiation(this._sock, bytes),
         createSink: opts => new VideoSink(Object.assign({
             target: this._canvas,

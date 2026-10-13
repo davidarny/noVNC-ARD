@@ -216,18 +216,13 @@
         }
         // ardHpAudio: false leaves the Mac's sound unplayed
         const ardHpAudio = getParamCI('ardHpAudio') !== 'false';
-        // ardHpCodec: h264 or hevc offers the Mac that video codec alone,
-        // for testing. Normally both are offered and the Mac chooses: an
-        // Apple silicon Mac sends HEVC, an Intel Mac H.264.
-        const ardHpCodecParam = getParamCI('ardHpCodec');
-        const ardHpCodecs = ['h264', 'hevc'].includes(ardHpCodecParam) ? [ardHpCodecParam] : undefined;
         let ardHpSupported = false;
         let ardHpDisabled = false;
         // The connection in progress asked for High Performance:
         // { streamingSince }, null once it has failed or was not asked for
         let ardHpAttempt = null;
         const ardHpEarlyMs = 60000;
-        VideoSink.isSupported(ardHpCodecs ? ardHpCodecs[0] : 'hevc').then((ok) => {
+        VideoSink.isSupported().then((ok) => {
             ardHpSupported = ok;
             if (!ok) Log.Info('ARD: this browser cannot decode High Performance video');
             // A connection made before the answer was known (autoconnect)
@@ -325,7 +320,6 @@
             rfb._ardHpVirtualDisplay = ardHpVirtualDisplay;
             rfb._ardHpDisplay = hp ? ardHpDisplay() : null;
             rfb._ardHpAudio = ardHpAudio;
-            rfb._ardHpCodecs = ardHpCodecs;
             rfb.ardAudioMuted = ardAudioMuted;
             // Virtual Display in Standard quality is the ordinary virtual
             // login: nothing more is asked of the Mac.
@@ -391,7 +385,7 @@
                 }
                 last = { at: now, bytes: s.stats.videoBytes, pictures: s.stats.pictures };
                 document.getElementById('ard_info_video').textContent =
-                    (s.videoFormat === 'h264' ? 'H.264 ' : 'HEVC ') + s.video.width + '×' + s.video.height + rate;
+                    'HEVC ' + s.video.width + '×' + s.video.height + rate;
                 document.getElementById('ard_info_audio').textContent =
                     !ardHpAudio ? 'Off' : !s.audioReady ? 'Not available' : ardAudioMuted ? 'Muted' : 'On';
             };

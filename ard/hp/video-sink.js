@@ -1,19 +1,14 @@
 /*
  * High Performance mode — decoding and painting.
  *
- * The server sends the screen as horizontal stripes, each an HEVC or an
- * H.264 picture, all part of one bitstream (ARD protocol spec, Section
- * 14.10). One
+ * The server sends the screen as horizontal stripes, each an HEVC picture,
+ * all part of one bitstream (ARD protocol spec, Section 14.10). One
  * WebCodecs decoder takes the pictures in decoding order; each decoded
  * frame is painted into its stripe of an overlay canvas that covers
  * noVNC's own canvas. noVNC's canvas keeps handling input and the cursor.
  */
 
-import * as hevc from './hevc.js';
-import * as h264 from './h264.js';
-
-// What the assembler calls a picture's format → how to name its stream
-const FORMATS = { hevc, h264 };
+import { DEFAULT_CODEC, codecFromAnnexB } from './hevc.js';
 
 function decoderConfig(codec) {
     return {
@@ -61,13 +56,11 @@ export function overlayGeometry(box, view) {
 }
 
 export class VideoSink {
-    // Whether this browser can decode the streams of one format, 'hevc' (what
-    // an Apple silicon server sends) or 'h264' (an Intel server).
-    static async isSupported(format = 'hevc') {
-        if (typeof VideoDecoder === 'undefined' || !FORMATS[format]) return false;
+    // Whether this browser can decode the streams the server sends.
+    static async isSupported(codec = DEFAULT_CODEC) {
+        if (typeof VideoDecoder === 'undefined') return false;
         try {
-            const result = await VideoDecoder.isConfigSupported(
-                decoderConfig(FORMATS[format].DEFAULT_CODEC));
+            const result = await VideoDecoder.isConfigSupported(decoderConfig(codec));
             return !!result.supported;
         } catch (e) {
             return false;
@@ -90,7 +83,6 @@ export class VideoSink {
         this._onError = onError || (() => {});
         this._stripeOf = new Map();     // chunk timestamp (don) → stripe
         this._decoder = null;
-        this.format = null;             // 'hevc' or 'h264' once the first key picture has come
         this._painted = false;
         this._closed = false;
         this.stats = { submitted: 0, decoded: 0, dropped: 0 };
@@ -176,7 +168,7 @@ export class VideoSink {
         }
     }
 
-    // One picture from the assembler: { don, stripe, key, format, data }.
+    // One picture from the assembler: { don, stripe, key, data }.
     push(picture) {
         if (this._closed) return;
         try {
@@ -187,16 +179,13 @@ export class VideoSink {
                     this.stats.dropped++;
                     return;
                 }
-                const format = FORMATS[picture.format] || hevc;
-                this.format = picture.format || 'hevc';
-                this._configure(format.codecFromAnnexB(picture.data) || format.DEFAULT_CODEC);
+                this._configure(codecFromAnnexB(picture.data) || DEFAULT_CODEC);
             }
             this._stripeOf.set(picture.don, picture.stripe);
             this._decoder.decode(new EncodedVideoChunk({
                 type: picture.key ? 'key' : 'delta',
                 timestamp: picture.don,
-                // An H.264 decoder would otherwise hold pictures back
-                data: this.format === 'h264' ? h264.withoutReordering(picture.data) : picture.data,
+                data: picture.data,
             }));
             this.stats.submitted++;
         } catch (e) {

@@ -1,6 +1,6 @@
 /*
  * Unit tests for the High Performance video assembler: RTP packets in,
- * HEVC or H.264 pictures out in decoding order. Every packet here is synthetic.
+ * HEVC pictures out in decoding order. Every packet here is synthetic.
  *
  * Run: node --test ard/tests/test.hp-rtp-video.js
  */
@@ -129,7 +129,7 @@ describe('VideoAssembler payload formats', () => {
 
         strictEqual(h.pictures.length, 1);
         deepStrictEqual(h.pictures[0], {
-            don: 4000, stripe: 0, frame: 9, key: true, format: 'hevc', data: annexB(idr),
+            don: 4000, stripe: 0, frame: 9, key: true, data: annexB(idr),
         });
         deepStrictEqual(h.asm.stats, {
             packets: 1, ignored: 0, malformed: 0, duplicates: 0, pictures: 1, discarded: 0,
@@ -169,7 +169,7 @@ describe('VideoAssembler payload formats', () => {
 
         strictEqual(h.pictures.length, 1);
         deepStrictEqual(h.pictures[0], {
-            don: 500, stripe: 0, frame: 3, key: true, format: 'hevc', data: annexB(...PARAMS, idr),
+            don: 500, stripe: 0, frame: 3, key: true, data: annexB(...PARAMS, idr),
         });
     });
 
@@ -644,199 +644,5 @@ describe('VideoAssembler malformed input', () => {
         deepStrictEqual(h.asm.stats, {
             packets: 3, ignored: 1, malformed: 1, duplicates: 0, pictures: 1, discarded: 0,
         });
-    });
-});
-
-// --- H.264, as an Intel server sends it (Section 14.10.1) ---
-
-const PT_H264 = 123;
-const H264_SLICE = 1, H264_IDR = 5;
-
-// Fake H.264 NAL unit: a one-byte header (NRI 1), then `size` filler bytes
-function nal264(type, size, seed = 0) {
-    const out = new Uint8Array(1 + size);
-    out[0] = 0x20 | type;
-    for (let i = 0; i < size; i++) out[1 + i] = (type * 29 + seed * 13 + i * 5 + 3) & 0xff;
-    return out;
-}
-
-// FU-B on every piece: indicator, header, DON, data
-function fragments264(unit, don, n) {
-    const body = unit.subarray(1);
-    const step = Math.ceil(body.length / n);
-    const out = [];
-    for (let i = 0; i < n; i++) {
-        const flags = (i === 0 ? 0x80 : 0) | (i === n - 1 ? 0x40 : 0);
-        out.push(concat(
-            [(unit[0] & 0xe0) | 29, flags | (unit[0] & 0x1f)],
-            u16(don),
-            body.subarray(i * step, (i + 1) * step)));
-    }
-    return out;
-}
-
-function box(type, ...content) {
-    const body = concat(...content);
-    const size = 8 + body.length;
-    return concat([size >>> 24, (size >> 16) & 0xff, (size >> 8) & 0xff, size & 0xff],
-                  Array.from(type, c => c.charCodeAt(0)), body);
-}
-
-const SPS264 = Uint8Array.of(0x27, 0x64, 0x00, 0x34, 0xac, 0x13, 0x16, 0x50);
-const PPS264 = Uint8Array.of(0x28, 0xee, 0x1f, 0x2c);
-
-// The parameter packet: four bytes, then an 'avc1' sample entry
-function parameterPacket(sps = SPS264, pps = PPS264) {
-    const avcC = box('avcC',
-        [1, sps[1], sps[2], sps[3], 0xff, 0xe1], u16(sps.length), sps,
-        [1], u16(pps.length), pps);
-    return concat([0x92, 0xe6, 0xc0, 0xa3],
-                  box('avc1', new Uint8Array(78), avcC, box('pasp', [0, 0, 0, 1, 0, 0, 0, 1])));
-}
-
-function picture264(where, payloads) {
-    return picture(where, payloads).map(p => ({ ...p, payloadType: PT_H264 }));
-}
-
-describe('VideoAssembler H.264', () => {
-    it('joins the parameter packet and a fragmented IDR slice', () => {
-        const h = harness();
-        const idr = nal264(H264_IDR, 3000);
-        const packets = picture264({ seq: 23663, frame: 27001 }, [
-            parameterPacket(),
-            ...fragments264(idr, 0, 4),
-        ]);
-        strictEqual(packets.length, 5);
-
-        h.push(packets.slice(0, 4));
-        strictEqual(h.pictures.length, 0, 'not complete before the last packet');
-        h.push(packets.slice(4));
-
-        deepStrictEqual(h.pictures, [{
-            don: 0, stripe: 0, frame: 27001, key: true, format: 'h264',
-            data: annexB(SPS264, PPS264, idr),
-        }]);
-        strictEqual(h.asm.stats.malformed, 0);
-    });
-
-    it('rebuilds the NAL header from the indicator and the fragment header', () => {
-        const h = harness();
-        const idr = nal264(H264_IDR, 50);
-        idr[0] = 0x60 | H264_IDR;       // NRI 3
-        h.push(picture264({}, fragments264(idr, 7, 3)));
-        deepStrictEqual(h.pictures[0].data, annexB(idr));
-        strictEqual(h.pictures[0].key, true);
-    });
-
-    it('accepts a unit that starts and ends in one piece', () => {
-        const h = harness();
-        const idr = nal264(H264_IDR, 40);
-        h.push(picture264({}, fragments264(idr, 3, 1)));
-        deepStrictEqual(h.pictures[0].data, annexB(idr));
-    });
-
-    it('reports a picture without an IDR slice as not key', () => {
-        const h = harness();
-        h.push(picture264({ seq: 0 }, fragments264(nal264(H264_IDR, 60), 10, 2)));
-        const slice = nal264(H264_SLICE, 60);
-        h.push(picture264({ seq: 10, stripe: 1 }, fragments264(slice, 11, 2)));
-        strictEqual(h.pictures[1].key, false);
-        strictEqual(h.pictures[1].format, 'h264');
-        deepStrictEqual(h.pictures[1].data, annexB(slice));
-    });
-
-    it('starts four stripes, each with its own parameter packet', () => {
-        const h = harness();
-        const units = [nal264(H264_IDR, 900), nal264(H264_SLICE, 700, 1),
-                       nal264(H264_SLICE, 500, 2), nal264(H264_SLICE, 300, 3)];
-        const packets = units.flatMap((unit, stripe) => picture264(
-            { stripe, seq: 1000 * (stripe + 1), frame: 500 },
-            [parameterPacket(), ...fragments264(unit, stripe, 3)]));
-        // the lower stripes first: nothing may be emitted before the key picture
-        h.push(packets.slice(4));
-        strictEqual(h.pictures.length, 0);
-        h.push(packets.slice(0, 4));
-
-        deepStrictEqual(h.pictures.map(p => [p.don, p.stripe, p.key]),
-                        [[0, 0, true], [1, 1, false], [2, 2, false], [3, 3, false]]);
-        units.forEach((unit, i) => {
-            deepStrictEqual(h.pictures[i].data, annexB(SPS264, PPS264, unit));
-        });
-    });
-
-    it('takes the parameter packet when it arrives after the slice', () => {
-        const h = harness();
-        const idr = nal264(H264_IDR, 400);
-        const packets = picture264({ seq: 65534, frame: 8 }, [
-            parameterPacket(), ...fragments264(idr, 65535, 3)]);
-        h.push([packets[2], packets[3], packets[1]]);
-        strictEqual(h.pictures.length, 0);
-        h.push([packets[0]]);
-        deepStrictEqual(h.pictures[0].data, annexB(SPS264, PPS264, idr));
-        strictEqual(h.pictures[0].don & 0xffff, 65535);
-    });
-
-    it('does not give a parameter packet to a picture of another frame', () => {
-        const h = harness();
-        const idr = nal264(H264_IDR, 100);
-        const stray = picture264({ seq: 50, frame: 1 }, [parameterPacket(), new Uint8Array(4)])[0];
-        h.push([stray]);
-        h.push(picture264({ seq: 60, frame: 2 }, fragments264(idr, 0, 2)));
-        deepStrictEqual(h.pictures[0].data, annexB(idr));
-
-        // and it is forgotten: a later picture of the same frame number is not held up
-        const slice = nal264(H264_SLICE, 100);
-        h.push(picture264({ seq: 70, frame: 1 }, fragments264(slice, 1, 2)));
-        deepStrictEqual(h.pictures[1].data, annexB(slice));
-    });
-
-    it('ignores a duplicated parameter packet', () => {
-        const h = harness();
-        const idr = nal264(H264_IDR, 100);
-        const packets = picture264({ seq: 5, frame: 3 }, [
-            parameterPacket(), ...fragments264(idr, 0, 2)]);
-        h.push([packets[0], packets[1], packets[0]]);
-        strictEqual(h.asm.stats.duplicates, 1);
-        h.push([packets[2]]);
-        deepStrictEqual(h.pictures[0].data, annexB(SPS264, PPS264, idr));
-    });
-
-    it('drops a parameter packet whose boxes do not hold together', () => {
-        const h = harness();
-        const good = parameterPacket();
-        const cut = good.subarray(0, good.length - 30);
-        const noRecord = concat([0x92, 0xe6, 0xc0, 0xa3], box('avc1', new Uint8Array(78)));
-        for (const payload of [cut, noRecord]) {
-            h.push(picture264({ seq: 0 }, [payload, new Uint8Array(4)]).slice(0, 1));
-        }
-        strictEqual(h.asm.stats.malformed, 2);
-    });
-
-    it('drops H.264 payload forms it does not know', () => {
-        const h = harness();
-        for (const type of [0, 24, 25, 28, 30, 31]) {
-            h.push(picture264({}, [Uint8Array.of(0x20 | type, 0x85, 0, 0, 1, 2, 3)]));
-        }
-        strictEqual(h.asm.stats.malformed, 6);
-        strictEqual(h.pictures.length, 0);
-    });
-
-    it('drops a packet whose payload type differs from its picture', () => {
-        const h = harness();
-        const idr = nal264(H264_IDR, 80);
-        const packets = picture264({ seq: 4 }, fragments264(idr, 6, 3));
-        h.push([packets[0], packets[1]]);
-        h.asm.push({ ...packets[2], payloadType: 100, payload: fragments(nal(IDR, 80), 6, 3)[2] }, 0);
-        strictEqual(h.asm.stats.malformed, 1);
-        h.push([packets[2]]);
-        deepStrictEqual(h.pictures[0].data, annexB(idr));
-    });
-
-    it('stalls behind a missing picture as it does for HEVC', () => {
-        const h = harness({ stallMs: 100 });
-        h.push(picture264({ seq: 0 }, fragments264(nal264(H264_IDR, 50), 0, 2)), 0);
-        h.push(picture264({ seq: 20, stripe: 2 }, fragments264(nal264(H264_SLICE, 50), 2, 2)), 10);
-        h.asm.tick(200);
-        deepStrictEqual(h.stalls, [{ expectedDon: 1, buffered: 1 }]);
     });
 });

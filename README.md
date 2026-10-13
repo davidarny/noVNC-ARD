@@ -59,7 +59,6 @@ open http://localhost:6088/ard.html
 | `ardHpResolution` | string | `1920x1080` | In `highperf`, the size of the virtual display to ask for, in points: `1600x900` (drawn at 2 pixels to the point), `2560x1440@1` (with the scale, 1 or 2), or `window` for the size of the browser window. The picture is kept within 3840×2160 pixels. What a Mac does with sizes other than the default is not yet known |
 | `ardHpAudio` | boolean | `true` | In `highperf`, play the Mac's sound |
 | `ardHpFeedback` | string | all | Which RTCP the viewer sends in `highperf`: a comma list of `rr`, `ack`, `rctl`. For protocol testing |
-| `ardHpCodec` | string | both | Offer the Mac one video codec only, `h264` or `hevc`, and require the browser to decode that one. For protocol testing |
 | `ardEncryption` | integer | `2` | Encryption mode: `1` = keystroke-only, `2` = full tunnel |
 | `ardControlMode` | integer | `1` | Control mode: `0` = observe, `1` = shared, `2` = exclusive |
 | `virtualLogin` | integer | `1` | Session select: `0` = always share, `1` = show picker, `2` = always virtual |
@@ -128,11 +127,11 @@ All presets include standard fallback encodings (CopyRect, Hextile, RRE) and ARD
 
 ## High Performance Mode (experimental)
 
-macOS 14 and later can send the screen as video over UDP instead of framebuffer updates: Screen Sharing's "High Performance" connection type. An Apple silicon Mac sends HEVC. An Intel Mac sends H.264: Apple's own viewers do not ask an Intel Mac for the mode, but the Mac does it when asked.
+macOS 14 and later can send the screen as HEVC video over UDP instead of framebuffer updates: Screen Sharing's "High Performance" connection type.
 
 Once signed in, a dialog asks what kind of session to open: **Share Display**, or **Virtual Display** in **High Performance** or **Standard** quality. It comes after sign-in, as in Apple's Screen Sharing, because only then is it known what the connection can do; the same dialog answers the Mac's own question when someone else is using its display. Standard is the ordinary virtual login, as before; High Performance has the Mac create one virtual display at 3840×2160. The last choice is remembered, and reconnects do not ask again. High Performance is greyed out, with the reason, when the browser cannot decode it, the relay has no media channel or another viewer is using it (checked while the dialog is open, without disturbing that viewer). `?ardSessionType=highperf` (or `?ardQuality=highperf`) chooses it without the dialog. During a High Performance session the toolbar has a button to mute the Mac's sound, and the info panel shows the picture size, bit rate and whether sound is playing.
 
-**Status: works against macOS 27 servers** (first live sessions 2026-10-12): the Mac creates a virtual display for the viewer and sends it at 3840×2160; sound plays. Experimental all the same: one relay, one session, no recovery from packet loss. **H.264 from an Intel Mac** is read by the same code and has been checked against a captured session (every picture rebuilt, and decoded by Chrome), but not yet watched live.
+**Status: works against macOS 27 servers** (first live sessions 2026-10-12): the Mac creates a virtual display for the viewer and sends it at 3840×2160; sound plays. Experimental all the same: one relay, one session, no recovery from packet loss.
 
 The server sends the media as UDP to the address of its TCP peer, which a browser cannot receive, so websockify is not enough. Use the relay in `relay/`, which bridges TCP like websockify and also carries the UDP over a second WebSocket:
 
@@ -145,7 +144,7 @@ open "http://localhost:6088/ard.html?ardQuality=highperf"
 
 Requirements:
 
-- A browser that decodes HEVC 4:4:4 through WebCodecs. Chrome, Edge and Safari on Apple silicon do; Firefox does not. Otherwise the page connects as `adaptive`. (The viewer offers the Mac both codecs and the Mac chooses, so the page asks for the one an Apple silicon Mac will choose.)
+- A browser that decodes HEVC 4:4:4 through WebCodecs. Chrome, Edge and Safari on Apple silicon do; Firefox does not. Otherwise the page connects as `adaptive`.
 - The relay must be reachable from the Mac on UDP 5900 and 5901, and those ports must be free on the relay's machine.
 - A machine fast enough: nothing can be left out of the stream, so a viewer that stays more than half a second behind for two seconds ends the session and carries on in Standard. Decryption runs on the page's main thread; measured in Chrome on Apple silicon it takes about 1 ms a packet at 7,500 packets a second (50 Mbit/s) without holding up the page.
 - One High Performance session per relay: the newest takes the media. The session dialog says when another viewer is using it.
@@ -156,7 +155,7 @@ Who may use the relay: it asks nobody who they are, so run it where only the peo
 
 The mode is chosen when the connection is made. If it cannot start, the page logs the reason and reconnects as `adaptive`. The same happens when the connection is lost before the picture arrives or within a minute of it: nothing in what a Mac says about itself is known to tell whether it has the mode, so a Mac that hangs up on the attempt is not asked twice. Choosing High Performance in the dialog tries again. The picture is drawn at the display's pixel resolution on a canvas laid over noVNC's own, which keeps handling input and the cursor.
 
-The protocol code is in `ard/hp/`: negotiation (`negotiation.js`, `offer-template.js`, `virtual-display.js`, `plist.js`, `protobuf.js`, `zlib.js`), SRTP (`srtp.js`), picture reassembly (`rtp-video.js`), RTCP feedback (`feedback.js`), decoding and painting (`video-sink.js`, `hevc.js`, `h264.js`), sound (`audio.js`, `rtp-audio.js`, `audio-decoder.js`, `audio-sink.js`, `pcm-worklet.js`, `pcm-ring.js`) and the session that ties them together (`session.js`).
+The protocol code is in `ard/hp/`: negotiation (`negotiation.js`, `offer-template.js`, `virtual-display.js`, `plist.js`, `protobuf.js`, `zlib.js`), SRTP (`srtp.js`), picture reassembly (`rtp-video.js`), RTCP feedback (`feedback.js`), decoding and painting (`video-sink.js`, `hevc.js`), sound (`audio.js`, `rtp-audio.js`, `audio-decoder.js`, `audio-sink.js`, `pcm-worklet.js`, `pcm-ring.js`) and the session that ties them together (`session.js`).
 
 ### Sound and the bundled decoder
 
