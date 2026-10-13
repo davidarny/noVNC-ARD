@@ -148,6 +148,7 @@ RFB.prototype._negotiateProtocolVersion = function () {
             this._ardSessionSelectStage = null;
             this._ardSessionSelectConsoleUser = '';
             this._ardSessionType = null;  // 1=ShareDisplay, 2=VirtualDisplay
+            this._ardVirtualDisplayAsked = false;   // message 0x1d was sent
             this._ardVirtualLogin = this._ardVirtualLogin ?? 1; // 0=always share, 1=show picker, 2=always virtual
             this._ardDeferredFBURequest = false;
 
@@ -1586,6 +1587,14 @@ RFB.prototype._ardHpRequestVirtualDisplay = function () {
                  (sizedStandard ? " (Standard quality, experimental)" : ""));
     }
     RFB.messages.ardVirtualDisplay(this._sock, buildVirtualDisplayMessage(display ? [display] : undefined));
+    this._ardVirtualDisplayAsked = true;
+};
+
+// The session is on a virtual display: one this viewer asked the server to
+// make, or the virtual display login the server offered.
+RFB.prototype.ardOnVirtualDisplay = function () {
+    return this._ardVirtualDisplayAsked ||
+           this._ardSessionType === sessionCmdConnectToVirtualDisplay;
 };
 
 // Full encryption has been asked for and has not started yet. Until it

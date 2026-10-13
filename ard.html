@@ -45,6 +45,7 @@
         import { VideoSink } from './ard/hp/video-sink.js';
         import { MEDIA_SUBPROTOCOL } from './ard/hp/session.js';
         import { parseDisplayRequest } from './ard/hp/virtual-display.js';
+        import { reconnectDelay } from './ard/reconnect-delay.js';
 
         let response;
 
@@ -1280,6 +1281,7 @@
             ardCloseDisplayPanel();
             const wasConnected = UI.connected;
             const isARD = wasConnected && ardReconnectCredentials !== null;
+            const onVirtualDisplay = !!(UI.rfb && UI.rfb.ardOnVirtualDisplay && UI.rfb.ardOnVirtualDisplay());
 
             // The connection was lost before High Performance had a
             // picture, or soon after. The Mac may not know the mode and
@@ -1315,9 +1317,9 @@
                     return;
                 }
 
-                // Exponential backoff: 500ms, 1s, 2s, 5s, 10s cap
-                const delays = [500, 1000, 2000, 5000, 10000];
-                const delay = delays[Math.min(ardReconnectAttempt - 1, delays.length - 1)];
+                // Backs off; longer after a session on a virtual display,
+                // which a Mac needs time to take down
+                const delay = reconnectDelay(ardReconnectAttempt, onVirtualDisplay);
 
                 // Show reconnecting UI
                 UI.connected = false;
