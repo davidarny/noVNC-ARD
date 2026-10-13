@@ -65,8 +65,10 @@ export const DEFAULT_VIRTUAL_DISPLAY = {
 const MAX_PIXELS = 3840 * 2160;
 // The room every display is made with. The message can only give it as a
 // width and a height, so it is the widest and the tallest a picture may be:
-// those of an 8K display. Apple's viewer states 3840 x 2160 here, and no
-// server has yet been sent a mode wider or taller than that.
+// those of an 8K display. Apple's viewer states 3840 x 2160 here; a server
+// (macOS 27.0.1) was seen to accept room of 7680 x 4320 and to resize a
+// display to modes wider than 3840 (4056, 4428) at scale 2, all ret = YES.
+// Larger than 7680 x 4320 has not been sent.
 const ROOM_PIXEL_WIDTH = 7680;
 const ROOM_PIXEL_HEIGHT = 4320;
 // The smallest mode a server shows as asked. Below it the server's window

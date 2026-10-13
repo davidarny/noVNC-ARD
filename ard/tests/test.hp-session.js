@@ -799,6 +799,37 @@ describe('High Performance session', () => {
         strictEqual(session.state, 'streaming');
     });
 
+    it('frees the old sink if the session is torn down mid-resize', async () => {
+        await stream();
+        session.reoffer();
+        await until(() => offers.length === 2, 'the second offer');
+        session.handleAnswer(await answerWith({
+            audioSsrc: 0x11112222, videoSsrc: 0x33334444, width: 2560, height: 1440, stripes: 4 }));
+        await until(() => sinks.length === 2, 'the new sink');
+        // The new picture has not arrived; the old sink is still held.
+        ok(!sinks[0].closed);
+        session.close();
+        ok(sinks[0].closed, 'the held old sink is closed on teardown');
+        ok(sinks[1].closed, 'the new sink is closed too');
+    });
+
+    it('does not start a second re-offer while one is in flight', async () => {
+        await stream();
+        session.reoffer();
+        await until(() => offers.length === 2, 'the second offer');
+        strictEqual(session.reoffering(), true);
+        session.reoffer();                 // ignored: one is already going
+        await settle();
+        strictEqual(offers.length, 2);
+        // Once it completes, a new one can go.
+        session.handleAnswer(await answerWith({
+            audioSsrc: 0x11112222, videoSsrc: 0x33334444, width: 2560, height: 1440, stripes: 4 }));
+        await until(() => sinks.length === 2, 'the new sink');
+        strictEqual(session.reoffering(), false);
+        session.reoffer();
+        await until(() => offers.length === 3, 'the third offer');
+    });
+
     it('does not re-offer unless it is streaming', async () => {
         await negotiate();          // 'waiting', not yet streaming
         session.reoffer();

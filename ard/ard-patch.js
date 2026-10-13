@@ -1600,6 +1600,10 @@ RFB.prototype._ardHpRequestVirtualDisplay = function () {
 RFB.prototype._ardHpResize = function (display) {
     if (!this._ardHp || this._ardHp.state !== 'streaming') return false;
     if (!this.ardOnVirtualDisplay() || !display) return false;
+    // One size change at a time: sending 0x1d for a new size while the last
+    // is still being negotiated would move the server's display out from
+    // under the stream the viewer is finishing.
+    if (this._ardHp.reoffering()) return false;
     const vd = virtualDisplayFor(display);
     const m = vd.modes[0];
     Log.Info("ARD: resizing the display to " + m.width + "x" + m.height +

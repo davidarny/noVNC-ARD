@@ -228,7 +228,13 @@
         // browser window, sharp at any size. On by default unless the URL
         // asked for a fixed size; the session dialog turns it on or off.
         const ardWindowFormUrl = /^window(@[12])?$/i.test(ardHpResolution || '');
-        const ardWindowScale = /@1$/i.test(ardHpResolution || '') ? 1 : 2;
+        // Match parseDisplayRequest for an explicit form: window@2 is 2,
+        // window@1 and bare "window" are 1. With no size asked at all, the
+        // dialog's Resize to window defaults to HiDPI (2).
+        const ardWindowScale =
+            /@2$/i.test(ardHpResolution || '') ? 2 :
+            /@1$/i.test(ardHpResolution || '') ? 1 :
+            ardWindowFormUrl ? 1 : 2;
         let ardResizeToWindow = ardWindowFormUrl || !ardHpResolution;
 
         function ardWindowDisplay() {
@@ -280,7 +286,11 @@
                 // new picture arrives.
                 ardFollowBlurred = false;
             } else {
-                ardFollowClearBlur();
+                // A re-offer is still in flight: keep the blur and try the
+                // new size again once it settles.
+                if (ardFollowTimer) clearTimeout(ardFollowTimer);
+                ardFollowTimer = setTimeout(() => { ardFollowTimer = null; ardFollowResize(); },
+                                            ARD_FOLLOW_DEBOUNCE_MS);
             }
         }
 

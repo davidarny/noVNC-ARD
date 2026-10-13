@@ -121,6 +121,7 @@ export class HpSession {
         this._reoffering = false;   // a resize re-offer is in flight
         this._pendingSecrets = null;
         this._resizeSignalled = false;  // onResize(true) sent, onResize(false) owed
+        this._resizeOldSink = null;     // kept alive until the new picture shows
         this._timers = new Set();
         this._intervals = new Set();
         this._sendChain = [Promise.resolve(), Promise.resolve()];
@@ -203,6 +204,10 @@ export class HpSession {
         if (this._sink) {
             this._sink.close();
             this._sink = null;
+        }
+        if (this._resizeOldSink) {
+            this._resizeOldSink.close();
+            this._resizeOldSink = null;
         }
         if (this._audio) {
             this._audio.close();
@@ -341,6 +346,11 @@ export class HpSession {
         }, (e) => { this._log('resize offer failed: ' + e.message); this._endReoffer(); this._resizeDone(); });
     }
 
+    // A resize re-offer is in flight: a second one must wait for it.
+    reoffering() {
+        return this._reoffering;
+    }
+
     _endReoffer() {
         this._reoffering = false;
         this._pendingSecrets = null;
@@ -383,6 +393,7 @@ export class HpSession {
             shown = true;
             clearTimeout(showTimer);
             if (oldSink && oldSink !== sink) oldSink.close();
+            this._resizeOldSink = null;
             this._resizeDone();
         };
         const sink = this._createSink({
@@ -403,9 +414,15 @@ export class HpSession {
         this._answer = answer;
         this._assembler = assembler;
         this._sink = sink;
+        // The old sink is kept until the new picture shows; hold it where
+        // teardown can find it, so a close() in that window frees it too.
+        this._resizeOldSink = (oldSink && oldSink !== sink) ? oldSink : null;
         this._audioSeq = new SeqTracker();
         this._videoSeq = new SeqTracker();
         this._lastSenderReport = [null, null];
+        // The new stream starts now: give the media-silence watchdog a fresh
+        // window so the gap of the mode switch does not trip it.
+        this._lastMediaAt = this._now();
         this._endReoffer();
         this._log('resized to ' + answer.video.width + 'x' + answer.video.height +
                   ', ' + answer.video.stripes + ' stripes');
