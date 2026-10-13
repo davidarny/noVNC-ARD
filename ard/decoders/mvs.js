@@ -8,7 +8,7 @@ import * as Log from "../../noVNC/core/util/logging.js";
 import MvsBitstream from "./mvs-bitstream.js";
 import { DEFAULT_LUMA_QUANT, DEFAULT_CHROMA_QUANT, MVS_ZIGZAG,
          CR_R_TAB, CB_B_TAB, CR_G_TAB, CB_G_TAB } from "./mvs-tables.js";
-import { idct8x8 } from "./mvs-idct.js";
+import { idct8x8, idctFlat } from "./mvs-idct.js";
 import { decodeDCRice, decodeACCoefficient } from "./mvs-rice.js";
 import { decodeHuffmanAC } from "./mvs-huffman.js";
 
@@ -48,8 +48,10 @@ export default class ArdMVSDecoder {
         // AC decode result — reusable, no per-coefficient allocation
         this._acResult = { value: 0, eob: false, skip: 0 };
 
-        // Per-tile RGBA output buffer (8×8×4 = 256 bytes)
+        // Per-tile RGBA output buffer (8×8×4 = 256 bytes), and the same
+        // memory as whole pixels for copying
         this._tileBuf = new Uint8Array(256);
+        this._tileBuf32 = new Uint32Array(this._tileBuf.buffer);
 
         // New cache entry built while decoding a partial DCT tile
         this._cacheEntry = new Int8Array(CACHE_ENTRY_SIZE);
@@ -70,9 +72,18 @@ export default class ArdMVSDecoder {
         this._cacheLastIdx = 0;  // most recently loaded slot
         this._cacheCount = 0;    // total number of inserts
 
+        // Rendered pixels of cache slots that have been loaded, so that
+        // loading a slot again does not transform it again. A slot's pixels
+        // are current while its generation equals the quantization tables'.
+        // Allocated on first use.
+        this._cachePixels = null;    // Uint32Array (64 per slot)
+        this._cachePixelGen = null;  // Uint32Array (0 = not rendered)
+        this._quantGen = 1;
+
         // Decoded framebuffer (RGBA). Match tiles copy from it, so it has
         // to live here rather than only on the canvas.
         this._fb = null;
+        this._fb32 = null;       // the same memory as whole pixels
         this._fbWidth = 0;
         this._fbHeight = 0;
         this._screenTilesX = 0;
@@ -102,6 +113,7 @@ export default class ArdMVSDecoder {
         this._fbWidth = fbW;
         this._fbHeight = fbH;
         this._fb = new Uint8Array(fbW * fbH * 4);
+        this._fb32 = new Uint32Array(this._fb.buffer);
         this._screenTilesX = Math.ceil(fbW / 8);
         const screenTilesY = Math.ceil(fbH / 8);
         this._screenTilesTotal = this._screenTilesX * screenTilesY;
@@ -133,9 +145,11 @@ export default class ArdMVSDecoder {
 
         const updateType = data[0];
 
+        // A rectangle need not start on a multiple of 8: with several
+        // displays combined, each display has its own tile grid, starting
+        // at its own origin.
         if (updateType !== 0x02 &&
-            ((x & 7) !== 0 || (y & 7) !== 0 ||
-             x + width > this._fbWidth || y + height > this._fbHeight)) {
+            (x + width > this._fbWidth || y + height > this._fbHeight)) {
             Log.Warn("MVS: bad rectangle " + width + "x" + height +
                      " at " + x + "," + y);
             return true;
@@ -178,6 +192,7 @@ export default class ArdMVSDecoder {
         }
         this._lumaQuant.set(data.subarray(1, 65));
         this._chromaQuant.set(data.subarray(65, 129));
+        this._quantGen++;
     }
 
     _handleFullUpdate(data, x, y, width, height) {
@@ -509,6 +524,9 @@ export default class ArdMVSDecoder {
         }
         this._cacheCount++;
         this._cache.set(entry, this._cacheWriteIdx * CACHE_ENTRY_SIZE);
+        if (this._cachePixelGen !== null) {
+            this._cachePixelGen[this._cacheWriteIdx] = 0;
+        }
     }
 
     _decodeChromaDCDelta(bs, baseline) {
@@ -618,7 +636,9 @@ export default class ArdMVSDecoder {
             if (prevDctIdx < 0) {
                 Log.Warn("MVS: repeat tile without a previous DCT tile");
             } else {
-                coeffs.set(state.subarray(0, 64));
+                for (let i = 0; i < 64; i++) {
+                    coeffs[i] = state[i];
+                }
                 coeffs[CB] = state[CB];
                 coeffs[CR] = state[CR];
                 this._copyTileDesc(prevDctIdx, screenIdx);
@@ -657,7 +677,11 @@ export default class ArdMVSDecoder {
 
             // The descriptor keeps the int8-truncated coefficients
             this._tileDescThreshold[screenIdx] = threshold;
-            this._tileDescYCoeffs.set(coeffs.subarray(0, 64), screenIdx * 64);
+            const descY = this._tileDescYCoeffs;
+            const descBase = screenIdx * 64;
+            for (let i = 0; i < 64; i++) {
+                descY[descBase + i] = coeffs[i];
+            }
             this._tileDescCbValid[screenIdx] = 1;
             this._tileDescCbDC[screenIdx] = coeffs[CB];
             this._tileDescCrValid[screenIdx] = 1;
@@ -693,22 +717,42 @@ export default class ArdMVSDecoder {
             return false;
         }
 
-        const coeffs = this._coeffs;
-        const cache = this._cache;
-        const base = idx * CACHE_ENTRY_SIZE;
-        coeffs.fill(0);
+        if (this._cachePixels === null) {
+            this._cachePixels = new Uint32Array((CACHE_SIZE + 1) * 64);
+            this._cachePixelGen = new Uint32Array(CACHE_SIZE + 1);
+        }
+        const tile = this._tileBuf32;
+        const pixels = this._cachePixels;
+        const pixelBase = idx * 64;
 
-        for (let i = 0; i < CACHE_ENTRY_Y; i++) {
-            coeffs[i] = cache[base + i];
-        }
-        for (let i = 0; i < CACHE_ENTRY_CR; i++) {
-            coeffs[CR + i] = cache[base + CACHE_ENTRY_Y + i];
-        }
-        for (let i = 0; i < CACHE_ENTRY_CB; i++) {
-            coeffs[CB + i] = cache[base + CACHE_ENTRY_Y + CACHE_ENTRY_CR + i];
+        if (this._cachePixelGen[idx] === this._quantGen) {
+            for (let i = 0; i < 64; i++) {
+                tile[i] = pixels[pixelBase + i];
+            }
+        } else {
+            const coeffs = this._coeffs;
+            const cache = this._cache;
+            const base = idx * CACHE_ENTRY_SIZE;
+            coeffs.fill(0);
+
+            for (let i = 0; i < CACHE_ENTRY_Y; i++) {
+                coeffs[i] = cache[base + i];
+            }
+            for (let i = 0; i < CACHE_ENTRY_CR; i++) {
+                coeffs[CR + i] = cache[base + CACHE_ENTRY_Y + i];
+            }
+            for (let i = 0; i < CACHE_ENTRY_CB; i++) {
+                coeffs[CB + i] = cache[base + CACHE_ENTRY_Y + CACHE_ENTRY_CR + i];
+            }
+
+            this._dequantAndRender();
+
+            for (let i = 0; i < 64; i++) {
+                pixels[pixelBase + i] = tile[i];
+            }
+            this._cachePixelGen[idx] = this._quantGen;
         }
 
-        this._dequantAndRender();
         this._cacheLastIdx = idx;
         return true;
     }
@@ -716,32 +760,36 @@ export default class ArdMVSDecoder {
     // --- Dequantize + IDCT + Color Convert (all 3 planes, writes to _tileBuf) ---
 
     _dequantAndRender() {
-        const coeffs = this._coeffs;
-        const dqBuf = this._dqBuf;
-        const lumaQ = this._lumaQuant;
-        const chromaQ = this._chromaQuant;
+        const ySpatial = this._ySpatial;
+        const yFlat = this._transformPlane(0, this._lumaQuant, ySpatial);
+        if (yFlat >= 0) ySpatial.fill(yFlat);
 
-        for (let i = 0; i < 64; i++) {
-            const n = MVS_ZIGZAG[i];
-            dqBuf[n] = coeffs[i] * lumaQ[n];
-        }
-        idct8x8(dqBuf, this._ySpatial);
-
-        for (let i = 0; i < 64; i++) {
-            const n = MVS_ZIGZAG[i];
-            dqBuf[n] = coeffs[CB + i] * chromaQ[n];
-        }
-        idct8x8(dqBuf, this._cbSpatial);
-
-        for (let i = 0; i < 64; i++) {
-            const n = MVS_ZIGZAG[i];
-            dqBuf[n] = coeffs[CR + i] * chromaQ[n];
-        }
-        idct8x8(dqBuf, this._crSpatial);
+        const cbFlat = this._transformPlane(CB, this._chromaQuant, this._cbSpatial);
+        const crFlat = this._transformPlane(CR, this._chromaQuant, this._crSpatial);
 
         const tileBuf = this._tileBuf;
+
+        if (cbFlat >= 0 && crFlat >= 0) {
+            // One color for the whole tile, which is the usual case
+            const rAdd = CR_R_TAB[crFlat];
+            const gAdd = (CB_G_TAB[cbFlat] + CR_G_TAB[crFlat]) >> 16;
+            const bAdd = CB_B_TAB[cbFlat];
+            for (let i = 0; i < 64; i++) {
+                const yVal = ySpatial[i];
+                const off = i * 4;
+                tileBuf[off] = clamp255(yVal + rAdd);
+                tileBuf[off + 1] = clamp255(yVal + gAdd);
+                tileBuf[off + 2] = clamp255(yVal + bAdd);
+                tileBuf[off + 3] = 255;
+            }
+            return;
+        }
+
+        if (cbFlat >= 0) this._cbSpatial.fill(cbFlat);
+        if (crFlat >= 0) this._crSpatial.fill(crFlat);
+
         for (let i = 0; i < 64; i++) {
-            const yVal = this._ySpatial[i];
+            const yVal = ySpatial[i];
             const cb = this._cbSpatial[i];
             const cr = this._crSpatial[i];
 
@@ -753,17 +801,42 @@ export default class ArdMVSDecoder {
         }
     }
 
+    // Dequantize and transform one plane of _coeffs into `out`. A plane
+    // with only its DC coefficient set is one flat value: that value is
+    // returned and `out` is left alone. Otherwise returns -1.
+    _transformPlane(plane, quant, out) {
+        const coeffs = this._coeffs;
+        const dqBuf = this._dqBuf;
+
+        let ac = 0;
+        for (let i = 1; i < 64; i++) {
+            const n = MVS_ZIGZAG[i];
+            const value = coeffs[plane + i];
+            ac |= value;
+            dqBuf[n] = value * quant[n];
+        }
+        const dc = coeffs[plane] * quant[0];
+        if (ac === 0) {
+            return idctFlat(dc);
+        }
+        dqBuf[0] = dc;
+        idct8x8(dqBuf, out);
+        return -1;
+    }
+
     // --- Framebuffer ---
 
     // Write _tileBuf to the framebuffer
     _putTile(tileX, tileY, tileW, tileH) {
-        const fb = this._fb;
-        const rowBytes = tileW * 4;
-        let dst = (tileY * this._fbWidth + tileX) * 4;
+        const fb = this._fb32;
+        const tile = this._tileBuf32;
+        let dst = tileY * this._fbWidth + tileX;
         for (let row = 0; row < tileH; row++) {
-            const src = row * 32;
-            fb.set(this._tileBuf.subarray(src, src + rowBytes), dst);
-            dst += this._fbWidth * 4;
+            const src = row * 8;
+            for (let col = 0; col < tileW; col++) {
+                fb[dst + col] = tile[src + col];
+            }
+            dst += this._fbWidth;
         }
     }
 

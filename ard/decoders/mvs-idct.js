@@ -34,6 +34,15 @@ function rangeLimit(v) {
 }
 
 /**
+ * The one sample value an 8×8 block has when only its DC coefficient is
+ * set. Same result as idct8x8, without the transform.
+ * @param {number} dc — dequantized DC coefficient
+ */
+export function idctFlat(dc) {
+    return rangeLimit(((dc << PASS1_BITS) + (1 << (PASS1_BITS + 2))) >> (PASS1_BITS + 3));
+}
+
+/**
  * 8×8 inverse DCT.
  * @param {Int32Array} block — 64 dequantized coefficients in natural order
  * @param {Uint8Array} output — 64 samples (0..255) written in row-major order

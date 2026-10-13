@@ -18,6 +18,8 @@ globalThis.window = globalThis;
 console.warn = (...args) => warnings.push(args.join(' '));
 const { default: ArdMVSDecoder } = await import('../decoders/mvs.js');
 
+const { idct8x8, idctFlat } = await import('../decoders/mvs-idct.js');
+
 const WIDTH = 16;
 const HEIGHT = 8;
 
@@ -47,18 +49,24 @@ function partialUpdate(crLimit, cbLimit, body) {
 }
 
 class Screen {
-    constructor() {
-        this.width = WIDTH;
-        this.height = HEIGHT;
-        this.pixels = new Uint8Array(WIDTH * HEIGHT * 4);
+    constructor(width = WIDTH, height = HEIGHT) {
+        this.width = width;
+        this.height = height;
+        this.pixels = new Uint8Array(width * height * 4);
     }
 
     blitImage(x, y, width, height, arr, offset) {
         for (let row = 0; row < height; row++) {
             const src = offset + row * width * 4;
             this.pixels.set(arr.subarray(src, src + width * 4),
-                            ((y + row) * WIDTH + x) * 4);
+                            ((y + row) * this.width + x) * 4);
         }
+    }
+
+    // RGB of one pixel
+    pixel(x, y) {
+        const start = (y * this.width + x) * 4;
+        return Array.from(this.pixels.subarray(start, start + 3));
     }
 
     // RGB of the top-left pixel of a tile
@@ -77,13 +85,13 @@ class Screen {
     }
 }
 
-function decode(decoder, screen, payload) {
+function decode(decoder, screen, payload, x = 0, y = 0) {
     const sock = {
         rQwait: () => false,
         rQshift32: () => payload.length,
         rQshiftBytes: () => payload,
     };
-    decoder.decodeRect(0, 0, WIDTH, HEIGHT, sock, screen, 24);
+    decoder.decodeRect(x, y, WIDTH, HEIGHT, sock, screen, 24);
 }
 
 // Full update: tile 0 is a DCT tile with Y DC = 10 and neutral chroma,
@@ -234,5 +242,68 @@ describe('MVS partial update', () => {
         const screen = run(FULL, PARTIAL_CACHE_1);
         deepStrictEqual(warnings.length, 1);
         deepStrictEqual(screen.tile(1), GRAY);
+    });
+});
+
+// With several displays combined into one framebuffer, each display is
+// sent as its own rectangle, and a display need not start on a multiple
+// of 8 pixels.
+describe('MVS rectangle inside a larger framebuffer', () => {
+    // A 16x8 display placed at 16,3 in a 32x16 framebuffer
+    const X = 16;
+    const Y = 3;
+
+    function runAt(...payloads) {
+        const decoder = new ArdMVSDecoder();
+        const screen = new Screen(32, 16);
+        warnings.length = 0;
+        for (const payload of payloads) {
+            decode(decoder, screen, payload, X, Y);
+        }
+        return screen;
+    }
+
+    it('decodes a rectangle that does not start on a tile boundary', () => {
+        const screen = runAt(FULL);
+        deepStrictEqual(warnings, []);
+        deepStrictEqual(screen.pixel(X, Y), GRAY);
+        deepStrictEqual(screen.pixel(X + 15, Y + 7), GRAY);
+        // Nothing outside the rectangle is touched
+        deepStrictEqual(screen.pixel(X, Y - 1), [0, 0, 0]);
+        deepStrictEqual(screen.pixel(X, Y + 8), [0, 0, 0]);
+        deepStrictEqual(screen.pixel(X - 1, Y), [0, 0, 0]);
+    });
+
+    it('keeps the baseline and the cache for such a rectangle', () => {
+        const screen = runAt(FULL, PARTIAL_CR_UP, PARTIAL_UNCHANGED, PARTIAL_CACHE_1);
+        deepStrictEqual(warnings, []);
+        deepStrictEqual(screen.pixel(X, Y), GRAY);
+        deepStrictEqual(screen.pixel(X + 8, Y), REDDISH);
+    });
+
+    it('rejects a rectangle that leaves the framebuffer', () => {
+        const decoder = new ArdMVSDecoder();
+        const screen = new Screen(32, 16);
+        warnings.length = 0;
+        decode(decoder, screen, FULL, 24, 3);
+        deepStrictEqual(warnings.length, 1);
+        deepStrictEqual(screen.pixel(24, 3), [0, 0, 0]);
+    });
+});
+
+describe('MVS inverse DCT', () => {
+    it('gives a DC-only block the value the full transform gives it', () => {
+        const block = new Int32Array(64);
+        const samples = new Uint8Array(64);
+        // Covers every DC a tile can have: int8 coefficient × 8-bit step,
+        // and beyond, into the range where samples wrap
+        for (let dc = -40000; dc <= 40000; dc++) {
+            block[0] = dc;
+            idct8x8(block, samples);
+            const flat = idctFlat(dc);
+            if (samples[0] !== flat || samples[63] !== flat) {
+                deepStrictEqual({ dc, flat }, { dc, flat: samples[0] });
+            }
+        }
     });
 });
