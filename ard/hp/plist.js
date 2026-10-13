@@ -1,9 +1,14 @@
 /*
  * noVNC-ARD: Binary property list ("bplist00") subset codec
  *
- * Supports exactly one shape: a top-level dictionary with string keys whose
- * values are data (Uint8Array), strings, or non-negative integers. Anything
- * else is rejected.
+ * Supports one shape: a top-level dictionary with string keys whose values
+ * are data (Uint8Array), strings, or non-negative integers.
+ *
+ * Decoding does not read a value of any other kind (booleans, reals, dates,
+ * arrays, nested dictionaries, integers a Number cannot hold): its key is
+ * returned with the value undefined. A dictionary that has gained such a key
+ * can then still be read for the keys that are understood. A list that is
+ * malformed is rejected, as is encoding a value of another kind.
  *
  * Layout:
  *   "bplist00"
@@ -32,7 +37,7 @@ function fail(why) {
 /**
  * Decode a binary property list.
  * @param {Uint8Array} bytes
- * @returns {Object<string, Uint8Array|string|number>}
+ * @returns {Object<string, Uint8Array|string|number|undefined>}
  */
 export function decode(bytes) {
     if (!(bytes instanceof Uint8Array)) throw new TypeError('plist: input must be a Uint8Array');
@@ -106,11 +111,15 @@ export function decode(bytes) {
         const marker = bytes[pos];
         switch (marker & 0xf0) {
             case TYPE_INT: {
-                if ((marker & 0x0f) > 3) fail('unsupported integer size');
                 const width = 1 << (marker & 0x0f);
-                // 8-byte integers are signed; narrower ones are unsigned.
-                if (width === 8 && pos + 1 < tableAt && (bytes[pos + 1] & 0x80)) fail('negative integer');
-                return uint(pos + 1, width, tableAt);
+                if (pos + 1 + width > tableAt) fail('truncated');
+                // Not read: wider than 8 bytes, negative (8-byte integers
+                // are signed, narrower ones unsigned), or past what a
+                // Number holds exactly.
+                if (width > 8 || (width === 8 && (bytes[pos + 1] & 0x80))) return undefined;
+                let value = 0;
+                for (let i = 0; i < width; i++) value = value * 256 + bytes[pos + 1 + i];
+                return value > Number.MAX_SAFE_INTEGER ? undefined : value;
             }
             case TYPE_DATA: {
                 const [length, start] = sized(pos);
@@ -121,7 +130,7 @@ export function decode(bytes) {
             case TYPE_UTF16:
                 return readString(ref);
             default:
-                return fail(`unsupported value type 0x${marker.toString(16)}`);
+                return undefined;       // a kind of value this codec does not read
         }
     }
 

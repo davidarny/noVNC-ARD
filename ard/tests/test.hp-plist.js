@@ -357,7 +357,7 @@ describe('plist decode (malformed)', () => {
         throws(() => decode(build([[0xd2, 1, 3, 2, 2], str('k'), [0x10, 0x05], str('k')])));
     });
 
-    it('throws on unsupported value types', () => {
+    it('returns undefined for a value of a kind it does not read', () => {
         const values = {
             'null': [0x00],
             'false': [0x08],
@@ -371,22 +371,40 @@ describe('plist decode (malformed)', () => {
             '16-byte integer': [0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
         };
         for (const [name, value] of Object.entries(values)) {
-            throws(() => decode(build([[0xd1, 1, 2], str('k'), value])), name);
+            const dict = decode(build([[0xd1, 1, 2], str('k'), value]));
+            deepStrictEqual(Object.keys(dict), ['k'], name);
+            strictEqual(dict.k, undefined, name);
         }
     });
 
-    it('throws on a dictionary that contains itself', () => {
-        throws(() => decode(build([[0xd1, 1, 0], str('k')])));
+    it('reads the values it knows beside one it does not', () => {
+        // What a dictionary looks like once a later system adds a key.
+        for (const added of [[0x09], [0xa1, 3], [0xd0], [0x23, 0, 0, 0, 0, 0, 0, 0, 0]]) {
+            const dict = decode(build([
+                [0xd3, 1, 2, 3, 4, 5, 6], str('a'), str('new'), str('z'),
+                [0x42, 0xab, 0xcd], added, [0x10, 0x07],
+            ]));
+            deepStrictEqual(dict, { a: hex('ab cd'), new: undefined, z: 7 });
+        }
     });
 
-    it('throws on a negative integer', () => {
+    it('does not follow a dictionary that contains itself', () => {
+        deepStrictEqual(decode(build([[0xd1, 1, 0], str('k')])), { k: undefined });
+    });
+
+    it('does not read a negative integer', () => {
         const minusOne = [0x13, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
-        throws(() => decode(build([[0xd1, 1, 2], str('k'), minusOne])));
+        deepStrictEqual(decode(build([[0xd1, 1, 2], str('k'), minusOne])), { k: undefined });
     });
 
-    it('throws on an integer past the safe range', () => {
+    it('does not read an integer past the safe range', () => {
         const big = [0x13, 0x00, 0x20, 0, 0, 0, 0, 0, 0];    // 2^53
-        throws(() => decode(build([[0xd1, 1, 2], str('k'), big])));
+        deepStrictEqual(decode(build([[0xd1, 1, 2], str('k'), big])), { k: undefined });
+    });
+
+    it('throws on an integer cut short, whatever its width', () => {
+        throws(() => decode(build([[0xd1, 1, 2], str('k'), [0x13, 0, 0, 0]])));
+        throws(() => decode(build([[0xd1, 1, 2], str('k'), [0x14, 0, 0, 0, 0, 0, 0, 0, 0]])));
     });
 
     it('throws when a value runs past the object area', () => {
