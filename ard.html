@@ -40,6 +40,7 @@
 
         import UI from "./noVNC/app/ui.js";
         import * as Log from './noVNC/core/util/logging.js';
+        import KeyTable from './noVNC/core/input/keysym.js';
         import { encodingArdHalftone, encodingArdGray16, encodingArdThousands } from './ard/ard-constants.js';
         import { displayMenuEntries } from './ard/display-info.js';
 
@@ -441,6 +442,9 @@
                 .classList.toggle('noVNC_hidden', mode === 0);
             document.getElementById('noVNC_toggle_extra_keys_button')
                 .classList.toggle('noVNC_hidden', mode === 0);
+            const spotlightBtn = document.getElementById('noVNC_spotlight_button');
+            spotlightBtn.classList.toggle('noVNC_hidden', mode === 0);
+            spotlightBtn.disabled = (mode === 0);
         }
 
         function ardUpdateControlSettings() {
@@ -810,6 +814,27 @@
             winBtn.title = "Toggle Command";
         }
 
+        // Match toolbar modifiers to the physical Mac keyboard mappings.
+        const _origSendUIKey = UI.sendKey;
+        UI.sendKey = function (keysym, code, down) {
+            if (UI.rfb && UI.rfb._rfbAppleARD) {
+                if (keysym === KeyTable.XK_Alt_L && code === 'AltLeft') {
+                    keysym = KeyTable.XK_Mode_switch;
+                } else if (keysym === KeyTable.XK_Super_L && code === 'MetaLeft') {
+                    keysym = KeyTable.XK_Alt_L;
+                }
+            }
+            _origSendUIKey.call(UI, keysym, code, down);
+        };
+
+        document.getElementById('noVNC_spotlight_button')
+            .addEventListener('click', () => {
+                if (!UI.connected || !UI.rfb?._rfbAppleARD || UI.rfb.viewOnly) return;
+                UI.rfb.sendKey(KeyTable.XK_Alt_L, 'MetaLeft', true);
+                UI.rfb.sendKey(0x20, 'Space');
+                UI.sendKey(KeyTable.XK_Alt_L, 'MetaLeft', false);
+            });
+
         // =============================================================
         //  Control bar: stay open if cursor is hovering, auto-close on leave
         // =============================================================
@@ -850,6 +875,7 @@
             UI.showStatus(ardConnectionStatusMessage());
             if (UI.rfb && UI.rfb._rfbAppleARD) {
                 ardApplyMacKeyLabels();
+                document.getElementById('noVNC_spotlight_button').classList.remove('noVNC_hidden');
                 ardUpdateClipboardButtons(true);
                 ardUpdateControlSettings();
                 if (showArdQuality) {
@@ -885,6 +911,8 @@
         UI.disconnectFinished = function (e) {
             ardHideAvatar();
             ardUpdateClipboardButtons(false);
+            document.getElementById('noVNC_spotlight_button').classList.add('noVNC_hidden');
+            document.getElementById('noVNC_spotlight_button').disabled = true;
             // Reset exclusive control UI
             document.getElementById('noVNC_ard_exclusive_row').classList.add('noVNC_hidden');
             document.getElementById('noVNC_setting_exclusive_control').checked = false;
@@ -1025,6 +1053,16 @@
                     title="Send Ctrl-Alt-Del">
             </div>
             </div>
+
+            <!-- Open Spotlight in the remote Mac session -->
+            <button id="noVNC_spotlight_button" type="button"
+                    class="noVNC_button noVNC_icon_btn noVNC_hidden"
+                    disabled aria-label="Open remote Spotlight"
+                    title="Open remote Spotlight (Command+Space)">
+                <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
+                </svg>
+            </button>
 
             <!-- Shutdown/Reboot -->
             <input type="image" alt="Shutdown/Reboot" src="noVNC/app/images/power.svg"
