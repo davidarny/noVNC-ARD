@@ -44,7 +44,8 @@
         import { displayMenuEntries } from './ard/display-info.js';
         import { VideoSink } from './ard/hp/video-sink.js';
         import { MEDIA_SUBPROTOCOL } from './ard/hp/session.js';
-        import { parseDisplayRequest } from './ard/hp/virtual-display.js';
+        import { parseDisplayRequest, virtualDisplayFor } from './ard/hp/virtual-display.js';
+        import { DisplayFollower } from './ard/display-follow.js';
 
         let response;
 
@@ -198,23 +199,70 @@
         // ardHpVirtualDisplay: false shows the Mac's real displays instead of
         // a virtual display created for the viewer
         const ardHpVirtualDisplay = getParamCI('ardHpVirtualDisplay') !== 'false';
-        // ardHpResolution: the size of the virtual display to ask for, in
-        // High Performance and, experimentally, in a Standard virtual
-        // display login. In points: 1920x1080 (at 2 pixels to the point), 2560x1440@1 (with
-        // the scale), or window (this window's size). Default: the display
-        // Apple's viewer asks for, 1920x1080 at 2.
-        const ardHpResolution = getParamCI('ardHpResolution');
+        // ardResolution (also ardHpResolution): the size of the virtual
+        // display to ask for, in a virtual display login of either quality.
+        // In points: 1920x1080 (at 2 pixels to the point), 2560x1440@1
+        // (with the scale), window (this window's size, at 1) or window@2.
+        // With window the display follows the window: when it has been
+        // resized, the page connects again and asks for the new size.
+        // Default: nothing asked in Standard; in High Performance the
+        // display Apple's viewer asks for, 1920x1080 at 2.
+        const ardHpResolution = getParamCI('ardResolution') || getParamCI('ardHpResolution');
+        const ardFollowsWindow = /^window(@[12])?$/i.test(ardHpResolution || '');
+        // Raised when a Mac does not answer a request: 1 asks at one pixel
+        // to the point only, 2 asks for nothing.
+        let ardDisplayRetreat = 0;
         function ardHpDisplay() {
-            if (!ardHpResolution) return null;
+            if (!ardHpResolution || ardDisplayRetreat >= 2) return null;
             const box = document.getElementById('noVNC_container');
             const display = parseDisplayRequest(ardHpResolution, {
                 width: box ? box.clientWidth : window.innerWidth,
                 height: box ? box.clientHeight : window.innerHeight,
-                scale: window.devicePixelRatio || 1,
             });
-            if (!display) Log.Warn('ARD: ardHpResolution not understood: ' + ardHpResolution);
+            if (!display) {
+                Log.Warn('ARD: ardResolution not understood: ' + ardHpResolution);
+                return null;
+            }
+            if (ardDisplayRetreat >= 1) display.scale = 1;
             return display;
         }
+
+        // A reconnect the page makes on purpose (a new display size): the
+        // text to show meanwhile. Not a lost connection, so nothing is
+        // held against the Mac for it.
+        let ardPlannedReconnect = null;
+        function ardReconnectOnPurpose(text) {
+            if (!UI.rfb || !UI.connected) return;
+            ardPlannedReconnect = text;
+            UI.rfb.disconnect();
+        }
+
+        const ardDisplayFollower = new DisplayFollower({
+            wanted: () => {
+                const display = ardFollowsWindow ? ardHpDisplay() : null;
+                return display ? virtualDisplayFor(display).modes[0] : null;
+            },
+            connected: () => !!UI.rfb && UI.connected,
+            connecting: () => (!!UI.rfb && !UI.connected) || ardReconnectCallback !== null,
+            reconnect: (mode) => {
+                Log.Info('ARD: window is now ' + mode.width + 'x' + mode.height + ', reconnecting for a display of that size');
+                ardReconnectOnPurpose('Resizing the display to ' + mode.width + ' × ' + mode.height + '…');
+            },
+            onSilent: (mode) => {
+                // Seen from a Mac asked for two pixels to the point at a
+                // size it would not make: no display, no picture, no word.
+                const wasDouble = mode.pixelWidth > mode.width;
+                ardDisplayRetreat = wasDouble ? Math.max(ardDisplayRetreat, 1) : 2;
+                Log.Warn('ARD: no display reported after asking for ' + mode.pixelWidth + 'x' + mode.pixelHeight +
+                         ' pixels as ' + mode.width + 'x' + mode.height + ' points');
+                ardNotice(ardDisplayRetreat === 1
+                    ? 'The Mac did not make a display of that size at high resolution. Trying standard resolution.'
+                    : 'The Mac did not make a display of that size. Using its own.', 'warn', 8000);
+                ardReconnectOnPurpose('Reconnecting…');
+            },
+        });
+        new ResizeObserver(() => ardDisplayFollower.resized())
+            .observe(document.getElementById('noVNC_container'));
         // ardHpAudio: false leaves the Mac's sound unplayed
         const ardHpAudio = getParamCI('ardHpAudio') !== 'false';
         let ardHpSupported = false;
@@ -1135,6 +1183,8 @@
 
                 // Display list arrived or changed
                 UI.rfb.addEventListener('arddisplayinfo', ardUpdateDisplayMenu);
+                UI.rfb.addEventListener('arddisplayrequest', e => ardDisplayFollower.requested(e.detail));
+                UI.rfb.addEventListener('arddisplayinfo', () => ardDisplayFollower.answered());
 
                 // Update status bar when full encryption activates
                 UI.rfb.addEventListener('ardencryptionstate', () => {
@@ -1276,6 +1326,9 @@
             ardCloseDisplayPanel();
             const wasConnected = UI.connected;
             const isARD = wasConnected && ardReconnectCredentials !== null;
+            ardDisplayFollower.closed();
+            const planned = ardPlannedReconnect;
+            ardPlannedReconnect = null;
 
             // The connection was lost before High Performance had a
             // picture, or soon after. The Mac may not know the mode and
@@ -1283,7 +1336,7 @@
             // either way the next connection must not go the same way.
             const attempt = ardHpAttempt;
             ardHpAttempt = null;
-            if (attempt && wasConnected && !ardInhibitReconnect &&
+            if (attempt && wasConnected && !ardInhibitReconnect && !planned &&
                 (attempt.streamingSince === null ||
                  performance.now() - attempt.streamingSince < ardHpEarlyMs)) {
                 ardHpDisabled = true;
@@ -1311,15 +1364,16 @@
                     return;
                 }
 
-                // Exponential backoff: 500ms, 1s, 2s, 5s, 10s cap
+                // Exponential backoff: 500ms, 1s, 2s, 5s, 10s cap. A
+                // reconnect made on purpose does not wait.
                 const delays = [500, 1000, 2000, 5000, 10000];
-                const delay = delays[Math.min(ardReconnectAttempt - 1, delays.length - 1)];
+                const delay = planned ? 200 : delays[Math.min(ardReconnectAttempt - 1, delays.length - 1)];
 
                 // Show reconnecting UI
                 UI.connected = false;
                 UI.rfb = undefined;
                 document.getElementById('noVNC_transition_text').textContent =
-                    'Reconnecting...';
+                    planned || 'Reconnecting...';
                 UI.updateVisualState('reconnecting');
 
                 ardReconnectCallback = setTimeout(() => {

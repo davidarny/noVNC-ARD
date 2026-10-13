@@ -117,12 +117,11 @@ describe('Display size as text', () => {
         deepStrictEqual(parseDisplayRequest('1280x720@2'), { width: 1280, height: 720, scale: 2 });
     });
 
-    it('takes the window for "window"', () => {
-        deepStrictEqual(parseDisplayRequest('window', viewport), { width: 1512, height: 862, scale: 2 });
+    it('takes the window for "window", at one pixel to the point on any screen', () => {
+        deepStrictEqual(parseDisplayRequest('window', viewport), { width: 1512, height: 862, scale: 1 });
         deepStrictEqual(parseDisplayRequest('Window', { width: 1280, height: 700, scale: 1 }),
                         { width: 1280, height: 700, scale: 1 });
-        deepStrictEqual(parseDisplayRequest('window', { width: 1280, height: 700, scale: 1.25 }).scale, 1);
-        deepStrictEqual(parseDisplayRequest('window', { width: 1280, height: 700, scale: 3 }).scale, 2);
+        deepStrictEqual(parseDisplayRequest('window', { width: 1280, height: 700 }).scale, 1);
     });
 
     it('takes the window at a stated scale for "window@2"', () => {

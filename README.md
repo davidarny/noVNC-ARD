@@ -56,7 +56,7 @@ open http://localhost:6088/ard.html
 | `ardSessionType` | string | ask | Skips the session dialog: `share` (the Mac's own displays), `virtual` (virtual login, standard quality) or `highperf` (virtual display in High Performance) |
 | `ardMediaPath` | string | `media` | Path of the relay's media WebSocket, used by `highperf` |
 | `ardHpVirtualDisplay` | boolean | `true` | In `highperf`, ask the Mac for a virtual display at 3840×2160. `false` shows its real displays |
-| `ardHpResolution` | string | `1920x1080` | The size of the virtual display to ask for, in `highperf` and, as an experiment, in a Standard virtual display login (where no viewer is known to ask, and nothing is asked without this parameter). In points: `1600x900` (drawn at 2 pixels to the point), `2560x1440@1` (with the scale, 1 or 2), `window` for the size of the browser window at the scale of the screen it is on, or `window@2` for that size at a stated scale. The picture is kept within 3840×2160 pixels. **Untried against the Macs this viewer asks**: what an Apple silicon Mac does with a size other than the default is not known |
+| `ardResolution` | string | — | The size of the virtual display to ask the Mac for, in a virtual display login of either quality. In points: `1600x900` (drawn at 2 pixels to the point), `2560x1440@1` (with the scale, 1 or 2), `window` (the size of the browser window, at 1) or `window@2`. The picture is kept within 3840×2160 pixels. With `window` the display **follows the window**: see "A display the size of the window". `ardHpResolution` is the same parameter under its first name |
 | `ardHpAudio` | boolean | `true` | In `highperf`, play the Mac's sound |
 | `ardHpFeedback` | string | all | Which RTCP the viewer sends in `highperf`: a comma list of `rr`, `ack`, `rctl`. For protocol testing |
 | `ardEncryption` | integer | `2` | Encryption mode: `1` = keystroke-only, `2` = full tunnel |
@@ -158,6 +158,23 @@ The mode is chosen when the connection is made. If it cannot start, the page log
 **Which Macs are asked.** Only those whose sign-in reply carries the capability bits seen on every Mac that has sent the mode as HEVC; for any other Mac the dialog greys High Performance out ("this Mac does not offer it"). In practice that leaves out Intel Macs, as Apple's own viewers do. An Intel Mac can be made to enter the mode, and then sends H.264, but in tests it did so undependably and kept the display it had made for the session afterwards; this viewer does not ask it and does not read H.264. The reading of those bits rests on few Macs: if High Performance is greyed out for an Apple silicon Mac that Apple's Screen Sharing offers it for, that is a bug here. Choosing High Performance in the dialog tries again. The picture is drawn at the display's pixel resolution on a canvas laid over noVNC's own, which keeps handling input and the cursor.
 
 The protocol code is in `ard/hp/`: negotiation (`negotiation.js`, `offer-template.js`, `virtual-display.js`, `plist.js`, `protobuf.js`, `zlib.js`), SRTP (`srtp.js`), picture reassembly (`rtp-video.js`), RTCP feedback (`feedback.js`), decoding and painting (`video-sink.js`, `hevc.js`), sound (`audio.js`, `rtp-audio.js`, `audio-decoder.js`, `audio-sink.js`, `pcm-worklet.js`, `pcm-ring.js`) and the session that ties them together (`session.js`).
+
+### A display the size of the window
+
+`ardResolution=window` asks the Mac to make the virtual display exactly as large as the browser window, so the desktop fills it with nothing scaled and nothing cut off. It works in a virtual display login of Standard quality as well as in High Performance: the request that Apple's viewer sends for High Performance is honoured by an Apple silicon Mac in an ordinary session too.
+
+```
+ard.html?ardSessionType=virtual&ardResolution=window
+```
+
+The size of a display cannot be changed while a session runs, so **resizing the window reconnects**: 1.2 seconds after the window has stopped changing, if it differs from the display by 24 points or more in either direction, the page says "Resizing the display…", connects again with the same sign-in and session choice, and asks for the new size. The session on the Mac carries on; only the display is made anew. A change of a few points (a scroll bar, a tool bar) is ignored, and dragging the edge about costs one reconnect, at the end.
+
+What to know:
+
+- `window` asks for one pixel to the point, which every Mac tried has honoured exactly. `window@2` asks for two (HiDPI): one Mac made such a display once, halved another and did not answer a third, so it is there to try, not to rely on.
+- A Mac that reports no display within 8 seconds of being asked is asked again at one pixel to the point, and failing that for nothing: the page says so and carries on with the Mac's own size.
+- Sessions of the same user share one virtual display. Two windows on one Mac's virtual display will each resize it under the other.
+- Tried against one Apple silicon Mac (macOS 27), from one browser, in one night. The reconnect on resize has not been run against a Mac at all yet.
 
 ### Sound and the bundled decoder
 
