@@ -1613,10 +1613,13 @@ RFB.prototype._ardHpResize = function (display) {
 // Soften the held picture while the new size is on its way, the way Apple's
 // viewer does, and clear it when the new picture arrives.
 RFB.prototype._ardHpResizeVisual = function (active) {
+    // The picture is drawn into an overlay canvas over noVNC's own, so the
+    // filter goes on the element that holds both (noVNC's _screen div).
     const canvas = this._canvas;
-    if (!canvas) return;
-    canvas.style.transition = 'filter 0.18s ease';
-    canvas.style.filter = active ? 'blur(8px) brightness(0.72)' : '';
+    const box = (canvas && canvas.parentElement) || canvas;
+    if (!box) return;
+    box.style.transition = 'filter 0.18s ease';
+    box.style.filter = active ? 'blur(8px) brightness(0.72)' : '';
 };
 
 // The session is on a virtual display: one this viewer asked the server to
