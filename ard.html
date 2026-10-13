@@ -1376,6 +1376,9 @@
             ardInhibitReconnect = true;
             ardReconnectCredentials = null;
             ardReconnectAttempt = 0;
+            // Leaving the session clears any High Performance block it left:
+            // the next connection is a fresh start and tries it again.
+            ardHpDisabled = false;
             if (ardReconnectCallback) {
                 clearTimeout(ardReconnectCallback);
                 ardReconnectCallback = null;

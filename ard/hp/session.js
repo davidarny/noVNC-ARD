@@ -424,6 +424,9 @@ export class HpSession {
         // The new stream starts now: give the media-silence watchdog a fresh
         // window so the gap of the mode switch does not trip it.
         this._lastMediaAt = this._now();
+        // The audio stream restarts with a new SSRC and sequence; let its
+        // reorder take the new numbers, or every packet reads as late.
+        if (this._audio && this._audio.resetStream) this._audio.resetStream();
         this._endReoffer();
         this._log('resized to ' + answer.video.width + 'x' + answer.video.height +
                   ', ' + answer.video.stripes + ' stripes');

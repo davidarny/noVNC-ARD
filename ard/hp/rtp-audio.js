@@ -30,6 +30,15 @@ export class AudioReorder {
         this.stats = { packets: 0, late: 0, duplicates: 0, lost: 0 };
     }
 
+    // The stream has restarted (a new SSRC after a resize): forget the old
+    // sequence so the new one's numbers become the baseline, or every new
+    // packet looks late and is dropped.
+    reset() {
+        this._waiting.clear();
+        this._next = null;
+        this._highest = null;
+    }
+
     push({ seq, timestamp, payload }) {
         this.stats.packets++;
         const ext = this._highest === null ? seq : extendSeq(this._highest, seq);

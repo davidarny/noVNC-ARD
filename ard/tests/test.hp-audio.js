@@ -59,6 +59,19 @@ describe('Audio packet order', () => {
         strictEqual(reorder.stats.late, 1);
     });
 
+    it('takes a restarted stream as a new baseline after reset', () => {
+        const { out, reorder } = collect();
+        for (const s of [6659, 6660]) reorder.push(packet(s));
+        deepStrictEqual(out, [[6659, 0], [6660, 0]]);
+        // The stream restarts with a low sequence; without reset these read
+        // as late and are dropped.
+        reorder.push(packet(5760));
+        strictEqual(reorder.stats.late, 1);
+        reorder.reset();
+        for (const s of [5760, 5761, 5762]) reorder.push(packet(s));
+        deepStrictEqual(out, [[6659, 0], [6660, 0], [5760, 0], [5761, 0], [5762, 0]]);
+    });
+
     it('follows the sequence number through its wrap', () => {
         const { out, reorder } = collect();
         for (const s of [65534, 65535, 65536, 65537]) reorder.push(packet(s));

@@ -1606,8 +1606,13 @@ RFB.prototype._ardHpResize = function (display) {
     if (this._ardHp.reoffering()) return false;
     const vd = virtualDisplayFor(display);
     const m = vd.modes[0];
-    Log.Info("ARD: resizing the display to " + m.width + "x" + m.height +
-             " points, " + m.pixelWidth + "x" + m.pixelHeight + " pixels");
+    const clamped = (m.width !== display.width || m.height !== display.height);
+    Log.Info("ARD: resize — asked " + display.width + "x" + display.height +
+             " pt @" + (display.scale || 2) + " -> sending " + m.width + "x" + m.height +
+             " pt, " + m.pixelWidth + "x" + m.pixelHeight + " px, room " +
+             vd.largest.pixelWidth + "x" + vd.largest.pixelHeight +
+             (clamped ? " (CLAMPED from window)" : "") +
+             " [" + (m.pixelWidth * m.pixelHeight * 60 / 1e6).toFixed(0) + " Mpx/s]");
     this._ardHpDisplay = display;
     RFB.messages.ardVirtualDisplay(this._sock, buildVirtualDisplayMessage([vd]));
     this._ardHp.reoffer();

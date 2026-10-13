@@ -61,6 +61,14 @@ export class AudioPipeline {
         if (!this._busy) this._run();
     }
 
+    // The audio stream restarted on a resize: drop what was queued from the
+    // old one and let the reorder take the new sequence as its baseline.
+    resetStream() {
+        if (this._closed) return;
+        this._reorder.reset();
+        this._queue = [];
+    }
+
     // Decode what has queued up, one batch at a time, strictly in order.
     async _run() {
         this._busy = true;
