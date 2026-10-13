@@ -56,6 +56,7 @@ open http://localhost:6088/ard.html
 | `ardSessionType` | string | ask | Skips the session dialog: `share` (the Mac's own displays), `virtual` (virtual login, standard quality) or `highperf` (virtual display in High Performance) |
 | `ardMediaPath` | string | `media` | Path of the relay's media WebSocket, used by `highperf` |
 | `ardHpVirtualDisplay` | boolean | `true` | In `highperf`, ask the Mac for a virtual display at 3840×2160. `false` shows its real displays |
+| `ardHpResolution` | string | `1920x1080` | In `highperf`, the size of the virtual display to ask for, in points: `1600x900` (drawn at 2 pixels to the point), `2560x1440@1` (with the scale, 1 or 2), or `window` for the size of the browser window. The picture is kept within 3840×2160 pixels. What a Mac does with sizes other than the default is not yet known |
 | `ardHpAudio` | boolean | `true` | In `highperf`, play the Mac's sound |
 | `ardHpFeedback` | string | all | Which RTCP the viewer sends in `highperf`: a comma list of `rr`, `ack`, `rctl`. For protocol testing |
 | `ardHpCodec` | string | both | Offer the Mac one video codec only, `h264` or `hevc`, and require the browser to decode that one. For protocol testing |

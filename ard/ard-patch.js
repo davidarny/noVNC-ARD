@@ -37,7 +37,7 @@ import { parseDisplayInfo2, setDisplayBytes, displayRole,
 import { sessionCommand, sessionSelectAction } from './session-select.js';
 import { HpSession } from './hp/session.js';
 import { VideoSink } from './hp/video-sink.js';
-import { buildVirtualDisplayMessage } from './hp/virtual-display.js';
+import { buildVirtualDisplayMessage, virtualDisplayFor } from './hp/virtual-display.js';
 
 import {
     encodingArdHalftone,
@@ -1562,7 +1562,15 @@ RFB.prototype._ardHpRequestVirtualDisplay = function () {
         Log.Info("ARD HP: plain ServerInit, not asking for a virtual display");
         return;
     }
-    RFB.messages.ardVirtualDisplay(this._sock, buildVirtualDisplayMessage());
+    // _ardHpDisplay: { width, height, scale } to ask for a display of that
+    // size; without it, the display Apple's viewer asks for
+    const display = this._ardHpDisplay ? virtualDisplayFor(this._ardHpDisplay) : null;
+    if (display) {
+        const m = display.modes[0];
+        Log.Info("ARD HP: asking for a display of " + m.width + "x" + m.height +
+                 " points, " + m.pixelWidth + "x" + m.pixelHeight + " pixels");
+    }
+    RFB.messages.ardVirtualDisplay(this._sock, buildVirtualDisplayMessage(display ? [display] : undefined));
 };
 
 // Full encryption has been asked for and has not started yet. Until it

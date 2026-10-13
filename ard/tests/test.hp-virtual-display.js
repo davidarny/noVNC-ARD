@@ -5,9 +5,11 @@
  */
 
 import { describe, it } from 'node:test';
-import { strictEqual, throws } from 'node:assert';
+import { strictEqual, deepStrictEqual, throws } from 'node:assert';
 
-import { buildVirtualDisplayMessage, DEFAULT_VIRTUAL_DISPLAY } from '../hp/virtual-display.js';
+import {
+    buildVirtualDisplayMessage, DEFAULT_VIRTUAL_DISPLAY, virtualDisplayFor, parseDisplayRequest,
+} from '../hp/virtual-display.js';
 
 // The message Apple's viewer sends for one virtual display.
 const REFERENCE =
@@ -53,5 +55,84 @@ describe('Virtual display request', () => {
         throws(() => buildVirtualDisplayMessage([{ name: 'A', modes: [] }]));
         throws(() => buildVirtualDisplayMessage([{ name: 'x'.repeat(128), modes: DEFAULT_VIRTUAL_DISPLAY.modes }]));
         throws(() => buildVirtualDisplayMessage([{ name: 'café', modes: DEFAULT_VIRTUAL_DISPLAY.modes }]));
+    });
+});
+
+describe('Virtual display of a chosen size', () => {
+    const mode = d => d.modes[0];
+
+    it('asks for the size in points and the pixels that go with the scale', () => {
+        deepStrictEqual(virtualDisplayFor({ width: 1920, height: 1080, scale: 2 }).modes, [
+            { pixelWidth: 3840, pixelHeight: 2160, width: 1920, height: 1080, refresh: 60 }]);
+        deepStrictEqual(virtualDisplayFor({ width: 1920, height: 1080, scale: 1 }).modes, [
+            { pixelWidth: 1920, pixelHeight: 1080, width: 1920, height: 1080, refresh: 60 }]);
+        // scale 2 when none is given, and Apple's name for the display
+        strictEqual(mode(virtualDisplayFor({ width: 1440, height: 900 })).pixelWidth, 2880);
+        strictEqual(virtualDisplayFor({ width: 1440, height: 900 }).name, DEFAULT_VIRTUAL_DISPLAY.name);
+    });
+
+    it('gives the same first mode as Apple for 1920x1080 at 2', () => {
+        deepStrictEqual(mode(virtualDisplayFor({ width: 1920, height: 1080, scale: 2 })),
+                        DEFAULT_VIRTUAL_DISPLAY.modes[0]);
+    });
+
+    it('keeps the picture within 3840x2160, in the same shape', () => {
+        const m = mode(virtualDisplayFor({ width: 2560, height: 1440, scale: 2 }));
+        deepStrictEqual([m.pixelWidth, m.pixelHeight, m.width, m.height], [3840, 2160, 1920, 1080]);
+        const tall = mode(virtualDisplayFor({ width: 1200, height: 1600, scale: 2 }));
+        deepStrictEqual([tall.pixelWidth, tall.pixelHeight, tall.width, tall.height], [1620, 2160, 810, 1080]);
+        const big = mode(virtualDisplayFor({ width: 5120, height: 2880, scale: 1 }));
+        deepStrictEqual([big.pixelWidth, big.pixelHeight], [3840, 2160]);
+    });
+
+    it('makes every dimension even and nothing smaller than 640x480', () => {
+        const odd = mode(virtualDisplayFor({ width: 1365, height: 767, scale: 1 }));
+        deepStrictEqual([odd.width, odd.height, odd.pixelWidth, odd.pixelHeight], [1366, 768, 1366, 768]);
+        const small = mode(virtualDisplayFor({ width: 320, height: 240, scale: 2 }));
+        deepStrictEqual([small.width, small.height, small.pixelWidth, small.pixelHeight], [640, 480, 1280, 960]);
+    });
+
+    it('refuses a size that is not one', () => {
+        throws(() => virtualDisplayFor({ width: 0, height: 1080 }));
+        throws(() => virtualDisplayFor({ width: 1920, height: NaN }));
+        throws(() => virtualDisplayFor({ width: 1920, height: 1080, scale: 0 }));
+    });
+
+    it('builds a message of one mode from it', () => {
+        const msg = buildVirtualDisplayMessage([virtualDisplayFor({ width: 1600, height: 900, scale: 2 })]);
+        const view = new DataView(msg.buffer);
+        strictEqual(msg.length, 12 + 156 + 28);
+        strictEqual(view.getUint16(12 + 154), 1);
+        deepStrictEqual([0, 4, 8, 12].map(o => view.getUint32(12 + 156 + o)), [3200, 1800, 1600, 900]);
+        deepStrictEqual([view.getUint32(12 + 138), view.getUint32(12 + 142)], [3200, 1800]);
+    });
+});
+
+describe('Display size as text', () => {
+    const viewport = { width: 1512.4, height: 861.6, scale: 2 };
+
+    it('reads points, with the scale when given', () => {
+        deepStrictEqual(parseDisplayRequest('1920x1080'), { width: 1920, height: 1080, scale: 2 });
+        deepStrictEqual(parseDisplayRequest('2560X1440@1'), { width: 2560, height: 1440, scale: 1 });
+        deepStrictEqual(parseDisplayRequest('1280x720@2'), { width: 1280, height: 720, scale: 2 });
+    });
+
+    it('takes the window for "window"', () => {
+        deepStrictEqual(parseDisplayRequest('window', viewport), { width: 1512, height: 862, scale: 2 });
+        deepStrictEqual(parseDisplayRequest('Window', { width: 1280, height: 700, scale: 1 }),
+                        { width: 1280, height: 700, scale: 1 });
+        deepStrictEqual(parseDisplayRequest('window', { width: 1280, height: 700, scale: 1.25 }).scale, 1);
+        deepStrictEqual(parseDisplayRequest('window', { width: 1280, height: 700, scale: 3 }).scale, 2);
+    });
+
+    it('returns null for anything else', () => {
+        for (const text of ['', '1920', '1920x', 'x1080', '1920x1080@3', '1920x1080@', '19x10',
+                            '1920*1080', ' 1920x1080', '1920x1080 ', 'auto', '1e3x1e3']) {
+            strictEqual(parseDisplayRequest(text, viewport), null, JSON.stringify(text));
+        }
+        strictEqual(parseDisplayRequest(null, viewport), null);
+        strictEqual(parseDisplayRequest(undefined, viewport), null);
+        strictEqual(parseDisplayRequest('window'), null);
+        strictEqual(parseDisplayRequest('window', { width: 0, height: 700, scale: 2 }), null);
     });
 });

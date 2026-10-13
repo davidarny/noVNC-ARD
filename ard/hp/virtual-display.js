@@ -53,6 +53,56 @@ export const DEFAULT_VIRTUAL_DISPLAY = {
     ],
 };
 
+// The largest picture a server has been seen to send.
+const MAX_PIXEL_WIDTH = 3840;
+const MAX_PIXEL_HEIGHT = 2160;
+const MIN_WIDTH = 640;
+const MIN_HEIGHT = 480;
+
+/*
+ * A display of one mode: `width` × `height` points, drawn at `scale` pixels
+ * to the point (2 is what Apple calls HiDPI). The size is brought within
+ * what servers are known to send, keeping its shape, and the pixel
+ * dimensions are made even, as video needs.
+ */
+export function virtualDisplayFor({ width, height, scale = 2 }) {
+    if (!(width > 0 && height > 0 && scale > 0)) throw new Error('virtual display: bad size');
+    const fit = Math.min(1, MAX_PIXEL_WIDTH / (width * scale), MAX_PIXEL_HEIGHT / (height * scale));
+    const grow = Math.max(1, MIN_WIDTH / (width * fit), MIN_HEIGHT / (height * fit));
+    const even = v => Math.max(2, Math.round(v / 2) * 2);
+    const w = even(width * fit * grow);
+    const h = even(height * fit * grow);
+    return {
+        name: DEFAULT_VIRTUAL_DISPLAY.name,
+        modes: [{
+            pixelWidth: Math.min(MAX_PIXEL_WIDTH, even(w * scale)),
+            pixelHeight: Math.min(MAX_PIXEL_HEIGHT, even(h * scale)),
+            width: w, height: h, refresh: 60,
+        }],
+    };
+}
+
+/*
+ * What a person asks for, as text: "1920x1080" (points, at 2 pixels to the
+ * point), "2560x1440@1" (with the scale) or "window" (the size given as
+ * `viewport`: { width, height, scale }). Returns { width, height, scale },
+ * or null when the text is none of these.
+ */
+export function parseDisplayRequest(text, viewport) {
+    if (typeof text !== 'string') return null;
+    if (text.toLowerCase() === 'window') {
+        if (!viewport || !(viewport.width > 0 && viewport.height > 0)) return null;
+        return {
+            width: Math.round(viewport.width),
+            height: Math.round(viewport.height),
+            scale: viewport.scale >= 1.5 ? 2 : 1,
+        };
+    }
+    const m = /^(\d{3,5})x(\d{3,5})(?:@([12]))?$/i.exec(text);
+    if (!m) return null;
+    return { width: Number(m[1]), height: Number(m[2]), scale: m[3] ? Number(m[3]) : 2 };
+}
+
 function displayRecord(display) {
     const modes = display.modes;
     if (!modes || modes.length === 0) throw new Error('virtual display: no modes');

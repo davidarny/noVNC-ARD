@@ -44,6 +44,7 @@
         import { displayMenuEntries } from './ard/display-info.js';
         import { VideoSink } from './ard/hp/video-sink.js';
         import { MEDIA_SUBPROTOCOL } from './ard/hp/session.js';
+        import { parseDisplayRequest } from './ard/hp/virtual-display.js';
 
         let response;
 
@@ -197,6 +198,22 @@
         // ardHpVirtualDisplay: false shows the Mac's real displays instead of
         // a virtual display created for the viewer
         const ardHpVirtualDisplay = getParamCI('ardHpVirtualDisplay') !== 'false';
+        // ardHpResolution: the size of the virtual display to ask for, in
+        // points: 1920x1080 (at 2 pixels to the point), 2560x1440@1 (with
+        // the scale), or window (this window's size). Default: the display
+        // Apple's viewer asks for, 1920x1080 at 2.
+        const ardHpResolution = getParamCI('ardHpResolution');
+        function ardHpDisplay() {
+            if (!ardHpResolution) return null;
+            const box = document.getElementById('noVNC_container');
+            const display = parseDisplayRequest(ardHpResolution, {
+                width: box ? box.clientWidth : window.innerWidth,
+                height: box ? box.clientHeight : window.innerHeight,
+                scale: window.devicePixelRatio || 1,
+            });
+            if (!display) Log.Warn('ARD: ardHpResolution not understood: ' + ardHpResolution);
+            return display;
+        }
         // ardHpAudio: false leaves the Mac's sound unplayed
         const ardHpAudio = getParamCI('ardHpAudio') !== 'false';
         // ardHpCodec: h264 or hevc offers the Mac that video codec alone,
@@ -305,6 +322,7 @@
             rfb._ardHpMediaUrl = hp ? ardHpMediaUrl() : null;
             rfb._ardHpFeedback = ardHpFeedback;
             rfb._ardHpVirtualDisplay = ardHpVirtualDisplay;
+            rfb._ardHpDisplay = hp ? ardHpDisplay() : null;
             rfb._ardHpAudio = ardHpAudio;
             rfb._ardHpCodecs = ardHpCodecs;
             rfb.ardAudioMuted = ardAudioMuted;
