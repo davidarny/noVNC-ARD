@@ -167,7 +167,7 @@ The protocol code is in `ard/hp/`: negotiation (`negotiation.js`, `offer-templat
 ard.html?ardSessionType=virtual&ardResolution=window
 ```
 
-The display is sized when the session is set up. **Resizing the window afterwards does not change it.**
+With `window` or `window@2`, the display then **follows the browser window**: in High Performance, a resize of the window asks the Mac for a display of the new size on the open connection, about a second after the resize settles, without reconnecting. This works only if the Mac's virtual display has "Dynamic resolution" on (in its Displays settings); without it the Mac may ignore the change until the next connection. A fixed size (for example `1920x1080`) is set once at connect and does not follow.
 
 What to know:
 

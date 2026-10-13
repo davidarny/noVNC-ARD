@@ -220,6 +220,49 @@
             return display;
         }
 
+        // ardResolution of the form "window" or "window@2" follows the
+        // browser window: while High Performance is streaming, a resize of
+        // the window asks the Mac for a display of the new size, on the open
+        // connection, without reconnecting.
+        const ardFollowsWindow = /^window(@[12])?$/i.test(ardHpResolution || '');
+        const ARD_FOLLOW_DEBOUNCE_MS = 800;
+        const ARD_FOLLOW_MIN_CHANGE = 24;   // points; ignore smaller jitters
+        let ardFollowTimer = null;
+        let ardFollowLast = null;           // { width, height } last asked for
+
+        function ardFollowStop() {
+            if (ardFollowTimer) { clearTimeout(ardFollowTimer); ardFollowTimer = null; }
+            ardFollowLast = null;
+        }
+
+        function ardFollowResize() {
+            const rfb = UI.rfb;
+            if (!ardFollowsWindow || !rfb || !rfb.ardHighPerformanceActive) return;
+            const display = ardHpDisplay();
+            if (!display) return;
+            if (ardFollowLast &&
+                Math.abs(display.width - ardFollowLast.width) < ARD_FOLLOW_MIN_CHANGE &&
+                Math.abs(display.height - ardFollowLast.height) < ARD_FOLLOW_MIN_CHANGE) {
+                return;
+            }
+            if (rfb._ardHpResize(display)) {
+                ardFollowLast = { width: display.width, height: display.height };
+            }
+        }
+
+        function ardFollowSchedule() {
+            if (!ardFollowsWindow) return;
+            if (ardFollowTimer) clearTimeout(ardFollowTimer);
+            ardFollowTimer = setTimeout(() => { ardFollowTimer = null; ardFollowResize(); },
+                                        ARD_FOLLOW_DEBOUNCE_MS);
+        }
+
+        if (ardFollowsWindow && typeof ResizeObserver !== 'undefined') {
+            const box = document.getElementById('noVNC_container');
+            if (box) new ResizeObserver(() => ardFollowSchedule()).observe(box);
+            window.addEventListener('resize', ardFollowSchedule);
+        }
+
         // ardHpAudio: false leaves the Mac's sound unplayed
         const ardHpAudio = getParamCI('ardHpAudio') !== 'false';
         let ardHpSupported = false;
@@ -343,6 +386,11 @@
             if (d.state === 'streaming') {
                 const v = d.video;
                 ardNotice('High Performance' + (v ? ' · ' + v.width + '×' + v.height : ''), 'normal', 3000);
+                // The size now on screen is the baseline the follower measures from.
+                if (ardFollowsWindow) {
+                    const display = ardHpDisplay();
+                    ardFollowLast = display ? { width: display.width, height: display.height } : null;
+                }
                 if (ardHpAttempt) ardHpAttempt.streamingSince = performance.now();
                 ardShowAudioButton(ardHpAudio);
                 ardStartHpInfo();
@@ -360,6 +408,7 @@
                 }
             } else if (d.state === 'closed') {
                 ardHpUiReset();
+                ardFollowStop();
             }
         }
 

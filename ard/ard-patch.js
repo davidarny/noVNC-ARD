@@ -1591,6 +1591,24 @@ RFB.prototype._ardHpRequestVirtualDisplay = function () {
     this._ardVirtualDisplayAsked = true;
 };
 
+// Ask the server, on the open connection, for a new picture size: send a
+// fresh VirtualDisplay (0x1d) and have the session re-offer, the way Apple's
+// viewer follows its window. Only while High Performance is streaming on a
+// virtual display. Whether the server acts on it may depend on that
+// display's "Dynamic resolution" setting.
+RFB.prototype._ardHpResize = function (display) {
+    if (!this._ardHp || this._ardHp.state !== 'streaming') return false;
+    if (!this.ardOnVirtualDisplay() || !display) return false;
+    const vd = virtualDisplayFor(display);
+    const m = vd.modes[0];
+    Log.Info("ARD: resizing the display to " + m.width + "x" + m.height +
+             " points, " + m.pixelWidth + "x" + m.pixelHeight + " pixels");
+    this._ardHpDisplay = display;
+    RFB.messages.ardVirtualDisplay(this._sock, buildVirtualDisplayMessage([vd]));
+    this._ardHp.reoffer();
+    return true;
+};
+
 // The session is on a virtual display: one this viewer asked the server to
 // make, or the virtual display login the server offered.
 RFB.prototype.ardOnVirtualDisplay = function () {
