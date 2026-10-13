@@ -573,7 +573,7 @@
             else if (reason !== null && hpInput.checked) stdInput.checked = true;
             hpInput.closest('label').classList.toggle('noVNC_ard_type_off', reason !== null);
             document.getElementById('noVNC_ard_type_hp_note').textContent = reason === null
-                ? 'Sharpest and smoothest, with sound. Needs a fast network'
+                ? 'Sharpest, with sound. Needs a fast network'
                 : checking ? 'Checking the connection…' : 'Not available: ' + reason;
             // Resize to window applies to High Performance only.
             const hpChosen = virtual && hpInput.checked && reason === null;
@@ -1943,7 +1943,7 @@
                    style="margin-left:1.6em">
                 <input type="checkbox" id="noVNC_ard_type_resize">
                 <span><strong>Resize to window</strong>
-                    <small>The Mac's display follows this window, sharp at any size</small></span>
+                    <small>Display follows the window, sharp at any size</small></span>
             </label>
             <label class="noVNC_ard_type_row">
                 <input type="radio" name="ard_quality" value="standard">
