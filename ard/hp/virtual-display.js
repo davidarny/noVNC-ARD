@@ -84,18 +84,20 @@ export function virtualDisplayFor({ width, height, scale = 2 }) {
 
 /*
  * What a person asks for, as text: "1920x1080" (points, at 2 pixels to the
- * point), "2560x1440@1" (with the scale) or "window" (the size given as
- * `viewport`: { width, height, scale }). Returns { width, height, scale },
- * or null when the text is none of these.
+ * point), "2560x1440@1" (with the scale), "window" (the size given as
+ * `viewport`: { width, height, scale }, at the scale of the screen it is
+ * on) or "window@2" (that size at a stated scale). Returns
+ * { width, height, scale }, or null when the text is none of these.
  */
 export function parseDisplayRequest(text, viewport) {
     if (typeof text !== 'string') return null;
-    if (text.toLowerCase() === 'window') {
+    const w = /^window(?:@([12]))?$/i.exec(text);
+    if (w) {
         if (!viewport || !(viewport.width > 0 && viewport.height > 0)) return null;
         return {
             width: Math.round(viewport.width),
             height: Math.round(viewport.height),
-            scale: viewport.scale >= 1.5 ? 2 : 1,
+            scale: w[1] ? Number(w[1]) : (viewport.scale >= 1.5 ? 2 : 1),
         };
     }
     const m = /^(\d{3,5})x(\d{3,5})(?:@([12]))?$/i.exec(text);
