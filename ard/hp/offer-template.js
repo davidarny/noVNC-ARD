@@ -24,6 +24,10 @@ export const MODE_VIDEO = 7;
 export const PAYLOAD_TYPE_HEVC = 100;
 export const PAYLOAD_TYPE_H264 = 123;
 
+// The video codecs an offer can list, in the order Apple's viewer lists them.
+// The server chooses; an Intel server sends H.264 whatever the offer says.
+export const VIDEO_CODECS = ['h264', 'hevc'];
+
 const FEATURES_H264 = 'FLS;MS:-1;LF:-1;LTR;CABAC;POS:0;EOD:1;HTS:2;RR:3;SW:4;AR:8/5,5/8;XR:8/5,5/8;';
 const FEATURES_HEVC = 'FLS;LF:-1;POS:5;EOD:1;HTS:2;RR:3;POSE:4;SW:0;AR:8/5,5/8;XR:8/5,5/8;';
 
@@ -80,15 +84,24 @@ export function audioBlobFields({ ssrc, ntpTime }) {
     ];
 }
 
-export function videoBlobFields({ ssrc, ntpTime }) {
+const CODEC_ENTRIES = {
+    h264: () => payloadEntry(PAYLOAD_TYPE_H264, [1, 2, 1, 2], FEATURES_H264, 1),
+    hevc: () => payloadEntry(PAYLOAD_TYPE_HEVC, [1, 2], FEATURES_HEVC, 14),
+};
+
+// codecs: which of VIDEO_CODECS to list. Apple's viewer lists both.
+export function videoBlobFields({ ssrc, ntpTime, codecs = VIDEO_CODECS }) {
+    const listed = VIDEO_CODECS.filter(codec => codecs.includes(codec));
+    if (listed.length === 0 || listed.length !== new Set(codecs).size) {
+        throw new Error('offer: bad video codecs');
+    }
     return [
         [1, 1],
         [2, 1],
         [5, [
             [1, ssrc],
             [2, 0],
-            [3, payloadEntry(PAYLOAD_TYPE_H264, [1, 2, 1, 2], FEATURES_H264, 1)],
-            [3, payloadEntry(PAYLOAD_TYPE_HEVC, [1, 2], FEATURES_HEVC, 14)],
+            ...listed.map(codec => [3, CODEC_ENTRIES[codec]()]),
             [6, 4],
             [7, 1],
             [8, 255],

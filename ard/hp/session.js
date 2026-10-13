@@ -74,9 +74,11 @@ export class HpSession {
      * onState(state, reason): called on every state change
      * feedback:        { reports, acks, rateControl } — which RTCP to send
      * endpoint:        how the viewer describes itself in the offer
+     * codecs:          the video codecs to list in the offer, 'h264' and 'hevc';
+     *                  both when not given
      */
     constructor({ mediaUrl, sendOffer, holdOffer, createSink, createAudio, audioMuted, onState,
-                  feedback, endpoint, WebSocketImpl, now, log }) {
+                  feedback, endpoint, codecs, WebSocketImpl, now, log }) {
         this._mediaUrl = mediaUrl;
         this._sendOffer = sendOffer;
         this._offerHeld = !!holdOffer;
@@ -87,6 +89,7 @@ export class HpSession {
         this._onState = onState || (() => {});
         this._feedback = Object.assign({ reports: true, acks: true, rateControl: true }, feedback);
         this._endpoint = endpoint;
+        this._codecs = codecs;
         this._WebSocket = WebSocketImpl || globalThis.WebSocket;
         this._now = now || (() => performance.now());
         this._log = log || (() => {});
@@ -103,6 +106,7 @@ export class HpSession {
         this._message1 = null;
         this._secrets = null;
         this._answer = null;
+        this._videoFormat = null;
         this._ctx = null;           // { audioIn, audioOut, videoIn, videoOut }
         this._assembler = null;
         this._sink = null;
@@ -120,6 +124,11 @@ export class HpSession {
     // The picture size and stripe count from the server's answer.
     get video() {
         return this._answer ? this._answer.video : null;
+    }
+
+    // 'hevc' or 'h264', known once the first key picture has arrived.
+    get videoFormat() {
+        return this._videoFormat;
     }
 
     get audioReady() {
@@ -266,7 +275,7 @@ export class HpSession {
         if (this.state !== 'idle' || !this._message1 || !this._wsOpen || this._offerHeld) return;
         this._setState('offering');
         this._secrets = generateSecrets();
-        buildOffer(this._secrets, { endpoint: this._endpoint }).then((offer) => {
+        buildOffer(this._secrets, { endpoint: this._endpoint, codecs: this._codecs }).then((offer) => {
             if (this.state !== 'offering') return;
             this._sendOffer(offer);
             this._timeout(ANSWER_MS, () => {
@@ -398,6 +407,10 @@ export class HpSession {
     _onPicture(picture) {
         this.stats.pictures++;
         if (picture.key) this.stats.keyPictures++;
+        if (this._videoFormat !== picture.format) {
+            this._videoFormat = picture.format;
+            this._log('video: ' + (picture.format === 'h264' ? 'H.264' : 'HEVC'));
+        }
         if (this._sink) this._sink.push(picture);
         if (this._feedback.acks) {
             this._sendRtcp(CHANNEL_VIDEO, pictureAck({

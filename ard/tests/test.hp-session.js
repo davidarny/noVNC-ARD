@@ -438,6 +438,41 @@ describe('High Performance session', () => {
         strictEqual(session.state, 'streaming');
     });
 
+    it('takes H.264 from an Intel server and says which format is arriving', async () => {
+        const keys = await negotiate();
+        const server = await createContext(keys.video.fromServer.key, keys.video.fromServer.salt);
+        strictEqual(session.videoFormat, null);
+
+        // payload type 123: an IDR slice in one FU-B piece (start and end)
+        const packet = new Uint8Array([
+            0x90, 0x80 | 123, ...u16(40), ...u32(0), ...u32(SERVER_VIDEO_SSRC),
+            0x93, 0x11, 0x00, 0x01, ...u16(1), ...u16(9),
+            0x3d, 0xc5, ...u16(0), 0x88, 0x84, 0x21,
+        ]);
+        ws.deliver(CHANNEL_VIDEO, await server.protectRtp(packet));
+        await until(() => sinks[0].pictures.length === 1, 'the picture');
+
+        strictEqual(session.videoFormat, 'h264');
+        deepStrictEqual(sinks[0].pictures[0], {
+            don: 0, stripe: 0, frame: 9, key: true, format: 'h264',
+            data: new Uint8Array([0, 0, 0, 1, 0x25, 0x88, 0x84, 0x21]),
+        });
+    });
+
+    it('offers only the video codecs it is given', async () => {
+        const sizes = [];
+        for (const codecs of [undefined, ['h264'], ['hevc']]) {
+            create({ codecs });
+            ws.open();
+            session.handleMessage1(message1());
+            await until(() => offers.length === 1, 'the offer');
+            sizes.push(new DataView(offers[0].buffer).getUint16(12));
+            session.close();
+        }
+        // one payload type entry fewer makes the video offer shorter
+        ok(sizes[1] < sizes[0] && sizes[2] < sizes[0], 'sizes ' + sizes);
+    });
+
     it('sends rate control every 50 ms and reports every second', async () => {
         const keys = await negotiate();
         const videoIn = await createContext(keys.video.fromServer.key, keys.video.fromServer.salt);

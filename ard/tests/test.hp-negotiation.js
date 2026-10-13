@@ -211,6 +211,30 @@ describe('Offer (message 0x1c)', () => {
         strictEqual(protobuf.get(entries[1], 4), 14);
     });
 
+    async function offeredPayloadTypes(options) {
+        const msg = await buildOffer(fixedSecrets(), { ntpTime, ...options });
+        const view = new DataView(msg.buffer);
+        const start = 220 + view.getUint16(10);
+        const dict = plist.decode(msg.subarray(start, start + view.getUint16(12)));
+        const blob = protobuf.decode(await inflate(dict.avcMediaStreamNegotiatorMediaBlob));
+        const video = protobuf.decode(protobuf.get(blob, 5));
+        return protobuf.getAll(video, 3).map(e => protobuf.get(protobuf.decode(e), 1));
+    }
+
+    it('lists only the video codecs it is told to', async () => {
+        deepStrictEqual(await offeredPayloadTypes({ codecs: ['h264'] }), [123]);
+        deepStrictEqual(await offeredPayloadTypes({ codecs: ['hevc'] }), [100]);
+        // whatever order they are named in, the offer keeps the viewer's order
+        deepStrictEqual(await offeredPayloadTypes({ codecs: ['hevc', 'h264'] }), [123, 100]);
+        deepStrictEqual(await offeredPayloadTypes({ codecs: undefined }), [123, 100]);
+    });
+
+    it('refuses an empty or unknown list of video codecs', async () => {
+        await rejects(buildOffer(fixedSecrets(), { ntpTime, codecs: [] }));
+        await rejects(buildOffer(fixedSecrets(), { ntpTime, codecs: ['vp9'] }));
+        await rejects(buildOffer(fixedSecrets(), { ntpTime, codecs: ['hevc', 'av1'] }));
+    });
+
     it('refuses malformed secrets', async () => {
         const s = fixedSecrets();
         s.audioKeys = new Uint8Array(10);
