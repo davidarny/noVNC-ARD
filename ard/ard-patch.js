@@ -1671,6 +1671,7 @@ RFB.prototype._ardHpStart = function () {
         onState: (state, reason) => this._ardHpOnState(state, reason),
         onResize: active => this._ardHpResizeVisual(active),
         log: msg => Log.Info("ARD HP: " + msg),
+        warn: msg => Log.Warn("ARD HP: " + msg),
     });
     this._ardHp.start();
 };

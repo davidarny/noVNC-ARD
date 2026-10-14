@@ -103,7 +103,7 @@ export class HpSession {
      * endpoint:        how the viewer describes itself in the offer
      */
     constructor({ mediaUrl, sendOffer, holdOffer, createSink, createAudio, audioMuted, onState,
-                  onResize, feedback, endpoint, WebSocketImpl, now, log }) {
+                  onResize, feedback, endpoint, WebSocketImpl, now, log, warn }) {
         this._mediaUrl = mediaUrl;
         this._sendOffer = sendOffer;
         this._offerHeld = !!holdOffer;
@@ -118,6 +118,7 @@ export class HpSession {
         this._WebSocket = WebSocketImpl || globalThis.WebSocket;
         this._now = now || (() => performance.now());
         this._log = log || (() => {});
+        this._warn = warn || this._log;
 
         this.state = 'idle';
         this.failure = null;
@@ -398,7 +399,7 @@ export class HpSession {
 
     _streamingFail(reason, detail) {
         // Log the pipeline state at the moment of trouble, to show the stage.
-        this._log('glitch ' + reason + (detail ? ' (' + detail + ')' : '') + ' — ' + this._diagLine());
+        this._warn('glitch ' + reason + (detail ? ' (' + detail + ')' : '') + ' — ' + this._diagLine());
         // A re-offer (resize or an earlier recovery) is already in flight and
         // will replace the stream; a glitch from the old one meanwhile — the
         // old assembler stalling, say — is its to resolve, not a reason to end.
@@ -408,8 +409,8 @@ export class HpSession {
         if (RECOVERABLE.has(reason) && this.state === 'streaming' &&
             this._recoveryAt.length < RECOVERY_MAX) {
             this._recoveryAt.push(now);
-            this._log('recovering from ' + reason + (detail ? ' (' + detail + ')' : '') +
-                      ', attempt ' + this._recoveryAt.length + ' of ' + RECOVERY_MAX);
+            this._warn('recovering from ' + reason + (detail ? ' (' + detail + ')' : '') +
+                       ', attempt ' + this._recoveryAt.length + ' of ' + RECOVERY_MAX);
             this._recovering = true;
             this._overloadedSince = null;   // give the fresh stream a clean slate
             this.reoffer();
