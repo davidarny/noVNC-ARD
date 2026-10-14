@@ -674,8 +674,11 @@
             if (e.target.id === 'noVNC_ard_type_resize') ardResizeToWindow = e.target.checked;
             ardSyncTypeDialog();
         });
-        // Enter anywhere in the dialog means Continue; Escape means Disconnect.
-        document.getElementById('noVNC_ard_type_dlg').addEventListener('keydown', (e) => {
+        // While the dialog is open, Enter means Continue and Escape means
+        // Disconnect, wherever the focus is (it need not be in the dialog).
+        document.addEventListener('keydown', (e) => {
+            const dlg = document.getElementById('noVNC_ard_type_dlg');
+            if (!dlg.classList.contains('noVNC_open')) return;
             if (e.key === 'Enter') {
                 e.preventDefault();
                 document.getElementById('noVNC_ard_type_continue').click();
