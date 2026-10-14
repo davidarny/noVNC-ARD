@@ -1161,6 +1161,17 @@ RFB.prototype._ardApplyDisplayInfo2 = function (info, rectW, rectH) {
 };
 
 // CursorAlpha (1104): [u32be cursorId][u32be dataSize][zlib data if dataSize>0]
+// In High Performance the server bakes the cursor into the HEVC picture on a
+// virtual display (a real/shared display does not), so drawing the client's own
+// cursor too would show a double — as Apple's own viewer does. The client cursor
+// is therefore hidden by default while HP media is on screen; the page's
+// "Show local cursor" advanced setting (rfb._ardHpShowLocalCursor) draws it
+// anyway. Only High Performance is affected; a standard session always draws it.
+RFB.prototype._ardHideLocalCursorInHp = function () {
+    if (!this._ardHp) return false;
+    return !this._ardHpShowLocalCursor;
+};
+
 RFB.prototype._ardHandleCursorAlpha = function () {
     if (this._sock.rQwait("CursorAlpha header", 8)) { return false; }
 
@@ -1200,7 +1211,9 @@ RFB.prototype._ardHandleCursorAlpha = function () {
             this._ardCursorCache.set(cursorId, { rgba, hotx, hoty, w, h });
             this._ardCurrentCursorId = cursorId;
 
-            if (this._ardCursorVisible) {
+            if (this._ardHideLocalCursorInHp()) {
+                this._canvas.style.cursor = 'none';
+            } else if (this._ardCursorVisible) {
                 this._updateCursor(rgba, hotx, hoty, w, h);
             }
 
@@ -1212,7 +1225,9 @@ RFB.prototype._ardHandleCursorAlpha = function () {
     } else if (cursorId >= 1000 && dataSize === 0) {
         // Set cached cursor
         const cached = this._ardCursorCache.get(cursorId);
-        if (cached && this._ardCursorVisible) {
+        if (this._ardHideLocalCursorInHp()) {
+            this._canvas.style.cursor = 'none';
+        } else if (cached && this._ardCursorVisible) {
             this._updateCursor(cached.rgba, cached.hotx, cached.hoty,
                               cached.w, cached.h);
         }
@@ -1223,7 +1238,11 @@ RFB.prototype._ardHandleCursorAlpha = function () {
         if (dataSize > 0) {
             this._sock.rQskipBytes(dataSize);
         }
-        this._ardSetPredefinedCursor(cursorId);
+        if (this._ardHideLocalCursorInHp()) {
+            this._canvas.style.cursor = 'none';
+        } else {
+            this._ardSetPredefinedCursor(cursorId);
+        }
         Log.Debug("ARD: CursorAlpha — predefined cursor id=" + cursorId);
     }
 
@@ -1688,10 +1707,13 @@ RFB.prototype._ardHpOnState = function (state, reason) {
     const session = this._ardHp;
     Log.Info("ARD HP: state " + state + (reason ? " (" + reason + ")" : ""));
 
-    // Once the server has answered, the picture comes as media. Apple's
-    // viewer then asks for no more framebuffer updates, not even in reply
-    // to the server's keep-alive; servers have been seen to drop a session
-    // that keeps asking.
+    // Once the server has answered, the picture comes as media, so the
+    // viewer stops asking for pixel framebuffer updates (fbUpdateRequest);
+    // servers have been seen to drop a session that keeps asking for pixels.
+    // The AutoFBUpdate subscription (0x09) is NOT silenced: it is how the
+    // server keeps pushing cursor-shape rects (1104/1100) and DisplayInfo2 on
+    // TCP during media, exactly as Apple's own viewer does. Silencing it too
+    // let the subscription lapse after ~3s and froze the cursor.
     this._sock._ardHpQuiet = state === 'waiting' || state === 'streaming';
 
     if (state === 'failed') {
@@ -1738,9 +1760,12 @@ RFB.prototype._ardHandleMediaStreamRect = function (which) {
     return true;
 };
 
-// Framebuffer update requests are dropped while High Performance media is
-// the picture. Both builders are called from many places, noVNC's own
-// update loop among them, so the check sits here.
+// Pixel framebuffer update requests are dropped while High Performance media
+// is the picture — the picture is HEVC over UDP, and a server has been seen to
+// drop a session that keeps asking for pixels. This is called from many
+// places, noVNC's own update loop among them, so the check sits here. The
+// AutoFBUpdate subscription (0x09) is deliberately NOT gated this way — it must
+// stay alive in HP to keep cursor-shape rects flowing (see ardAutoFBUpdate).
 const _origFbUpdateRequest = RFB.messages.fbUpdateRequest;
 RFB.messages.fbUpdateRequest = function (sock, ...args) {
     if (sock._ardHpQuiet) return;
@@ -2562,9 +2587,13 @@ RFB.messages.ardSetDisplay = function (sock, displayId = null) {
 // AutoFBUpdate (0x09): [type(1)][pad(1)][u16be enabled][u32be interval]
 //                      [u16be x][u16be y][u16be w][u16be h] = 16 bytes
 // Tells the server to automatically push framebuffer updates
-// without waiting for explicit FBUpdateRequests.
+// without waiting for explicit FBUpdateRequests. This is the subscription
+// that carries cursor-shape rects (1104/1100) and DisplayInfo2 on TCP, and
+// it lapses after ~3s of C→S silence unless renewed (per completed FBU and in
+// reply to a Tickle). It is NOT gated on _ardHpQuiet: in High Performance the
+// server pushes only those small control rects over TCP (the picture is HEVC
+// over UDP), so keeping the subscription alive is what keeps the cursor live.
 RFB.messages.ardAutoFBUpdate = function (sock, enabled, x, y, w, h) {
-    if (sock._ardHpQuiet) return;   // High Performance media is the picture
     sock.sQpush8(msgTypeAutoFBUpdate);  // 0x09
     sock.sQpush8(0);                    // padding
     sock.sQpush16(enabled);             // 1=enable, 0=disable

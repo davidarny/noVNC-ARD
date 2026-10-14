@@ -327,6 +327,18 @@
 
         // ardHpAudio: false leaves the Mac's sound unplayed
         const ardHpAudio = getParamCI('ardHpAudio') !== 'false';
+        // ardHpShowLocalCursor: High Performance bakes the cursor into the video
+        // on a virtual display, so the client cursor is hidden by default to
+        // avoid a double (Apple's own viewer shows the one in the video). The
+        // advanced "Show local cursor" checkbox — or ?ardHpShowLocalCursor=1/0 —
+        // draws the client cursor anyway. Persisted in localStorage.
+        const ardHpShowLocalCursorParam = getParamCI('ardHpShowLocalCursor');
+        function ardHpShowLocalCursor() {
+            if (ardHpShowLocalCursorParam === '1') return true;
+            if (ardHpShowLocalCursorParam === '0') return false;
+            const el = document.getElementById('noVNC_setting_ardHpShowLocalCursor');
+            return !!(el && el.checked);
+        }
         let ardHpSupported = false;
         let ardHpDisabled = false;
         // The connection in progress asked for High Performance:
@@ -438,6 +450,7 @@
             // browser window (and follows it); otherwise the URL size, if any.
             rfb._ardHpDisplay = (hp && ardResizeToWindow) ? ardWindowDisplay() : ardHpDisplay();
             rfb._ardHpAudio = ardHpAudio;
+            rfb._ardHpShowLocalCursor = ardHpShowLocalCursor();
             rfb.ardAudioMuted = ardAudioMuted;
             // Virtual Display in Standard quality is the ordinary virtual
             // login: nothing more is asked of the Mac.
@@ -1008,6 +1021,27 @@
                     ardSetControlModeUI(1);
                 }
             });
+
+        // Show local cursor (High Performance): hidden by default (the video
+        // carries the cursor on a virtual display). Persist the choice and
+        // apply it to a live session on toggle.
+        (function () {
+            const el = document.getElementById('noVNC_setting_ardHpShowLocalCursor');
+            if (!el) return;
+            try {
+                if (ardHpShowLocalCursorParam === '1' || ardHpShowLocalCursorParam === '0') {
+                    el.checked = ardHpShowLocalCursorParam === '1';
+                } else {
+                    el.checked = localStorage.getItem('ardHpShowLocalCursor') === '1';
+                }
+            } catch (e) { /* storage blocked — leave unchecked */ }
+            el.addEventListener('change', () => {
+                try {
+                    localStorage.setItem('ardHpShowLocalCursor', el.checked ? '1' : '0');
+                } catch (e) { /* ignore */ }
+                if (UI.rfb) UI.rfb._ardHpShowLocalCursor = el.checked;
+            });
+        })();
 
         // Display selector — button toggles panel, entries switch display
         function ardCloseDisplayPanel() {
@@ -1773,6 +1807,13 @@
                                     <option value="2">Full tunnel (default)</option>
                                     <option value="1">Keystroke only</option>
                                 </select>
+                            </li>
+                            <li>
+                                <label>
+                                    <input id="noVNC_setting_ardHpShowLocalCursor" type="checkbox"
+                                           class="toggle">
+                                    Show local cursor (High Performance)
+                                </label>
                             </li>
                             <li><hr></li>
                             <li>
