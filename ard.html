@@ -366,7 +366,8 @@
         // ---------------------------------------------------------------
         // ardSessionType=share|virtual|highperf forces the choice and skips
         // the dialog, as does ardQuality=highperf. Otherwise the dialog is
-        // shown when the user clicks Connect, with the last choice selected.
+        // shown when the user clicks Connect or the page first autoconnects,
+        // with the last choice selected.
         const ardSessionTypeParam = (getParamCI('ardSessionType') || '').toLowerCase();
         const ardForcedChoice =
             ardSessionTypeParam === 'share' ? { display: 'share', quality: 'standard' } :
@@ -1278,11 +1279,15 @@
         // =============================================================
 
         const _origUIConnect = UI.connect;
+        let ardConnectedBefore = false;             // has this page connected yet
         UI.connect = function (evt, password) {
-            // The user clicked Connect: once signed in, ask what kind of
-            // session to open, unless the URL has decided. Reconnects and
-            // autoconnect come without an event and reuse the choice made.
-            if (evt instanceof Event) {
+            // The user clicked Connect, or the page is autoconnecting for
+            // the first time: once signed in, ask what kind of session to
+            // open, unless the URL has decided. Reconnects come without an
+            // event and reuse the choice made.
+            const firstConnect = !ardConnectedBefore;
+            ardConnectedBefore = true;
+            if (evt instanceof Event || firstConnect) {
                 ardAskOnThisConnect = !ardForcedChoice;
                 // Connecting by hand gives High Performance another chance.
                 // With the session decided by the URL no dialog would.
