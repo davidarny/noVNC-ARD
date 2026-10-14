@@ -132,6 +132,7 @@ export class HpSession {
         this._resizeOldSink = null;     // kept alive until the new picture shows
         this._recovering = false;       // the current re-offer is a recovery
         this._recoveryAt = [];          // recent recovery times, for the cap
+        this._reofferGen = 0;           // which re-offer a pending timer belongs to
         this._timers = new Set();
         this._intervals = new Set();
         this._sendChain = [Promise.resolve(), Promise.resolve()];
@@ -343,22 +344,24 @@ export class HpSession {
     reoffer() {
         if (this.state !== 'streaming' || this._reoffering) return;
         this._reoffering = true;
+        const gen = ++this._reofferGen;
         this._lastMediaAt = this._now();   // the switch gap is not silence
         if (!this._resizeSignalled) { this._resizeSignalled = true; this._onResize(true); }
         this._pendingSecrets = generateSecrets();
         buildOffer(this._pendingSecrets, { endpoint: this._endpoint }).then((offer) => {
-            if (!this._reoffering) return;
+            if (this._reofferGen !== gen || !this._reoffering) return;
             this._sendOffer(offer);
             this._timeout(ANSWER_MS, () => {
-                if (this._reoffering) {
-                    const recovery = this._recovering;
-                    this._log((recovery ? 'recovery' : 'resize') + ': no answer');
-                    this._endReoffer();
-                    this._resizeDone();
-                    if (recovery) this._fail('media-stopped', 'recovery got no answer');
-                }
+                // Only this re-offer's own timer acts; a later one has a new gen.
+                if (this._reofferGen !== gen || !this._reoffering) return;
+                const recovery = this._recovering;
+                this._log((recovery ? 'recovery' : 'resize') + ': no answer');
+                this._endReoffer();
+                this._resizeDone();
+                if (recovery) this._fail('media-stopped', 'recovery got no answer');
             });
         }, (e) => {
+            if (this._reofferGen !== gen) return;
             const recovery = this._recovering;
             this._log('re-offer failed: ' + e.message);
             this._endReoffer();
@@ -371,9 +374,13 @@ export class HpSession {
     // connection rather than end High Performance, up to the cap. The old
     // picture stays, blurred, until the new stream has one.
     _streamingFail(reason, detail) {
+        // A re-offer (resize or an earlier recovery) is already in flight and
+        // will replace the stream; a glitch from the old one meanwhile — the
+        // old assembler stalling, say — is its to resolve, not a reason to end.
+        if (this._reoffering) return;
         const now = this._now();
         this._recoveryAt = this._recoveryAt.filter(t => now - t < RECOVERY_WINDOW_MS);
-        if (RECOVERABLE.has(reason) && this.state === 'streaming' && !this._reoffering &&
+        if (RECOVERABLE.has(reason) && this.state === 'streaming' &&
             this._recoveryAt.length < RECOVERY_MAX) {
             this._recoveryAt.push(now);
             this._log('recovering from ' + reason + (detail ? ' (' + detail + ')' : '') +
@@ -407,7 +414,7 @@ export class HpSession {
     async _swapMedia(payload) {
         const answer = await parseAnswer(payload);
         const secrets = this._pendingSecrets;
-        if (!secrets) return;
+        if (!secrets) { this._endReoffer(); this._resizeDone(); return; }
         const audio = splitKeyBlock(secrets.audioKeys);
         const video = splitKeyBlock(secrets.videoKeys);
         const ctx = {

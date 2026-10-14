@@ -885,6 +885,45 @@ describe('High Performance session', () => {
         strictEqual(session.failure.startsWith('media-stopped'), true);
     });
 
+    it('ignores a glitch from the old stream while a recovery is in flight', async () => {
+        await stream();
+        session._streamingFail('media-stopped');
+        await until(() => offers.length === 2, 'the recovery re-offer');
+        strictEqual(session.reoffering(), true);
+        // The old assembler stalls mid-recovery: left to the re-offer, not fatal.
+        session._streamingFail('stalled', 'old picture');
+        await settle();
+        strictEqual(session.state, 'streaming');
+        strictEqual(offers.length, 2);
+        session.handleAnswer(await answerWith({
+            audioSsrc: 0x1, videoSsrc: 0x2, width: 1920, height: 1080, stripes: 4 }));
+        await until(() => sinks.length === 2, 'the new sink');
+        sinks[1].opts.onFirstPicture();
+        strictEqual(session.state, 'streaming');
+    });
+
+    it('a stale re-offer timer does not abort a later recovery', async () => {
+        await stream();
+        // Recovery 1, answered.
+        session._streamingFail('media-stopped');
+        await until(() => offers.length === 2, 'recovery 1');
+        session.handleAnswer(await answerWith({
+            audioSsrc: 0x1, videoSsrc: 0x2, width: 1920, height: 1080, stripes: 4 }));
+        await until(() => sinks.length === 2, 'sink 2');
+        sinks[1].opts.onFirstPicture();
+        strictEqual(session.state, 'streaming');
+        // A little later, recovery 2, slow to answer.
+        mock.timers.tick(200);
+        session._streamingFail('media-stopped');
+        await until(() => offers.length === 3, 'recovery 2');
+        strictEqual(session.reoffering(), true);
+        // Recovery 1's own 5 s timer now fires: it must not touch recovery 2.
+        mock.timers.tick(4900);
+        await settle();
+        strictEqual(session.state, 'streaming');
+        strictEqual(session.reoffering(), true);
+    });
+
     it('does not re-offer unless it is streaming', async () => {
         await negotiate();          // 'waiting', not yet streaming
         session.reoffer();

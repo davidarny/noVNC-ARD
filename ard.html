@@ -504,10 +504,10 @@
                 let akbit = '';
                 if (last) {
                     const dt = (now - last.at) / 1000;
-                    const mbit = (s.stats.videoBytes - last.bytes) * 8 / 1e6 / dt;
-                    const pics = (s.stats.pictures - last.pictures) / dt;
+                    const mbit = Math.max(0, (s.stats.videoBytes - last.bytes)) * 8 / 1e6 / dt;
+                    const pics = Math.max(0, (s.stats.pictures - last.pictures)) / dt;
                     rate = ' · ' + mbit.toFixed(1) + ' Mbit/s · ' + Math.round(pics) + ' pictures/s';
-                    const akb = (s.stats.audioBytes - last.audioBytes) * 8 / 1e3 / dt;
+                    const akb = Math.max(0, (s.stats.audioBytes - last.audioBytes)) * 8 / 1e3 / dt;
                     akbit = ' · ' + Math.round(akb) + ' kbit/s';
                 }
                 last = { at: now, bytes: s.stats.videoBytes, pictures: s.stats.pictures,

@@ -44,6 +44,7 @@ export class AudioPipeline {
         this._closed = false;
         this.stats = { frames: 0, concealed: 0 };
         this._reorder = new AudioReorder({ onFrame: f => this._onFrame(f) });
+        this._epoch = 0;
     }
 
     get reorderStats() {
@@ -67,6 +68,7 @@ export class AudioPipeline {
         if (this._closed) return;
         this._reorder.reset();
         this._queue = [];
+        this._epoch++;   // discard a batch already in the decoder
     }
 
     // Decode what has queued up, one batch at a time, strictly in order.
@@ -75,8 +77,11 @@ export class AudioPipeline {
         while (this._queue.length && !this._closed) {
             const batch = this._queue;
             this._queue = [];
+            const epoch = this._epoch;
             const decoded = await this._decoder.decode(batch.map(f => f.data));
             if (this._closed) break;
+            // The stream restarted while this batch was decoding: it is old.
+            if (epoch !== this._epoch) continue;
 
             // Silence stands in for frames that never arrived, before the
             // sound that follows them.
