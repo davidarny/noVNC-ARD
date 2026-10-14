@@ -355,7 +355,9 @@ export class HpSession {
         if (this.state !== 'streaming' || this._reoffering) return;
         this._reoffering = true;
         const gen = ++this._reofferGen;
-        this._lastMediaAt = this._now();   // the switch gap is not silence
+        // The switch gap is not silence and not a freeze.
+        this._lastMediaAt = this._now();
+        this._lastPictureAt = this._now();
         if (!this._resizeSignalled) { this._resizeSignalled = true; this._onResize(true); }
         this._pendingSecrets = generateSecrets();
         buildOffer(this._pendingSecrets, { endpoint: this._endpoint }).then((offer) => {
@@ -390,7 +392,7 @@ export class HpSession {
         const backlog = (this._sink && this._sink.backlog) || 0;
         return 'decrypting=' + this._decrypting + ' authFail=' + this.stats.authFailures +
             ' vpkts=' + this.stats.videoPackets + ' pics=' + this.stats.pictures +
-            ' | asm buffered=' + a.buffered + ' next=' + a.next + ' first=' + a.first +
+            ' | asm buffered=' + a.buffered + ' next=' + a.next +
             ' stalled=' + a.stalled + ' ignored=' + a.ignored + ' malformed=' + a.malformed +
             ' dup=' + a.duplicates + ' emitted=' + a.emitted +
             ' | sink submitted=' + ss.submitted + ' decoded=' + ss.decoded +
@@ -398,12 +400,13 @@ export class HpSession {
     }
 
     _streamingFail(reason, detail) {
-        // Log the pipeline state at the moment of trouble, to show the stage.
-        this._warn('glitch ' + reason + (detail ? ' (' + detail + ')' : '') + ' — ' + this._diagLine());
         // A re-offer (resize or an earlier recovery) is already in flight and
         // will replace the stream; a glitch from the old one meanwhile — the
-        // old assembler stalling, say — is its to resolve, not a reason to end.
+        // old assembler stalling, say — is its to resolve, not a reason to end,
+        // and not worth warning about.
         if (this._reoffering) return;
+        // Log the pipeline state at the moment of trouble, to show the stage.
+        this._warn('glitch ' + reason + (detail ? ' (' + detail + ')' : '') + ' — ' + this._diagLine());
         const now = this._now();
         this._recoveryAt = this._recoveryAt.filter(t => now - t < RECOVERY_WINDOW_MS);
         if (RECOVERABLE.has(reason) && this.state === 'streaming' &&

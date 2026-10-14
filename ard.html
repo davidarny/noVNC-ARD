@@ -680,6 +680,10 @@
             const dlg = document.getElementById('noVNC_ard_type_dlg');
             if (!dlg.classList.contains('noVNC_open')) return;
             if (e.key === 'Enter') {
+                // Let a focused button activate itself (e.g. Disconnect); only
+                // default to Continue when focus is not on a button.
+                const a = document.activeElement;
+                if (a && a.tagName === 'BUTTON') return;
                 e.preventDefault();
                 document.getElementById('noVNC_ard_type_continue').click();
             } else if (e.key === 'Escape') {
