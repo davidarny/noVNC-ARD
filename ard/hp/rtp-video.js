@@ -161,7 +161,7 @@ export class VideoAssembler {
     // A snapshot of where the assembler is, for diagnosing a freeze.
     get diag() {
         return {
-            buffered: this._pictures.size, next: this._next, highest: this._highest,
+            buffered: this._pictures.size, next: this._next, first: this._first,
             stalled: this._stalled, ignored: this.stats.ignored, malformed: this.stats.malformed,
             duplicates: this.stats.duplicates, emitted: this.stats.pictures,
         };

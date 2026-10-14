@@ -390,7 +390,7 @@ export class HpSession {
         const backlog = (this._sink && this._sink.backlog) || 0;
         return 'decrypting=' + this._decrypting + ' authFail=' + this.stats.authFailures +
             ' vpkts=' + this.stats.videoPackets + ' pics=' + this.stats.pictures +
-            ' | asm buffered=' + a.buffered + ' next=' + a.next + ' highest=' + a.highest +
+            ' | asm buffered=' + a.buffered + ' next=' + a.next + ' first=' + a.first +
             ' stalled=' + a.stalled + ' ignored=' + a.ignored + ' malformed=' + a.malformed +
             ' dup=' + a.duplicates + ' emitted=' + a.emitted +
             ' | sink submitted=' + ss.submitted + ' decoded=' + ss.decoded +
