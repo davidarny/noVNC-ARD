@@ -49,6 +49,12 @@ const OVERLOAD_MS = 2000;
 // picture would stay as it was, looking alive.
 const MEDIA_SILENCE_MS = 3000;
 
+// The server sends video continuously in High Performance, even an idle
+// screen (40-400 kbit/s). So no video for this long means it has stopped,
+// and because sound keeps the all-media watchdog fed, the picture would sit
+// frozen while the audio plays on. This catches that on its own.
+const VIDEO_SILENCE_MS = 3000;
+
 // After a resize, how long to keep the old picture (blurred) waiting for the
 // new one to be fully drawn before showing the new stream regardless.
 const RESIZE_SHOW_MS = 2500;
@@ -468,9 +474,10 @@ export class HpSession {
         this._audioSeq = new SeqTracker();
         this._videoSeq = new SeqTracker();
         this._lastSenderReport = [null, null];
-        // The new stream starts now: give the media-silence watchdog a fresh
-        // window so the gap of the mode switch does not trip it.
+        // The new stream starts now: give the silence watchdogs a fresh
+        // window so the gap of the mode switch does not trip them.
         this._lastMediaAt = this._now();
+        this._lastVideoPacketAt = this._now();
         // The audio stream restarts with a new SSRC and sequence; let its
         // reorder take the new numbers, or every packet reads as late.
         if (this._audio && this._audio.resetStream) this._audio.resetStream();
@@ -652,6 +659,11 @@ export class HpSession {
         if (this.state === 'streaming' && !this._reoffering && this._lastMediaAt !== null &&
             now - this._lastMediaAt > MEDIA_SILENCE_MS) {
             this._streamingFail('media-stopped');
+        }
+        // Video stopped while sound carried on: the picture is frozen.
+        if (this.state === 'streaming' && !this._reoffering && this._lastVideoPacketAt !== null &&
+            now - this._lastVideoPacketAt > VIDEO_SILENCE_MS) {
+            this._streamingFail('media-stopped', 'video stopped');
         }
         if (!this._feedback.rateControl || this.state === 'failed') return;
         const sinceLast = this._lastVideoPacketAt === null ? 0 : now - this._lastVideoPacketAt;

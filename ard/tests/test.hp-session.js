@@ -607,9 +607,9 @@ describe('High Performance session', () => {
         ws.deliver(CHANNEL_VIDEO, await videoIn.protectRtp(keyPicturePacket({ stripe: 2, seq: 9, don: 12, frame: 1 })));
         await until(() => session.stats.videoPackets === 2, 'both packets');
         sinks[0].opts.onFirstFrame();
-        // The stall fires: it re-offers instead of ending, still streaming.
+        // The stall fires (fuse 200 ms): it re-offers instead of ending.
         for (let i = 0; i < 8 && offers.length < 2; i++) { mock.timers.tick(50); await settle(2); }
-        strictEqual(offers.length, 2, 'the recovery re-offer');
+        await until(() => offers.length === 2, 'the recovery re-offer');
         strictEqual(session.state, 'streaming');
         // The recovery gets no answer: now it falls back.
         mock.timers.tick(5000);
@@ -922,6 +922,27 @@ describe('High Performance session', () => {
         await settle();
         strictEqual(session.state, 'streaming');
         strictEqual(session.reoffering(), true);
+    });
+
+    it('recovers when video stops even though sound keeps arriving', async () => {
+        const keys = await negotiate();
+        const audio = await createContext(keys.audio.fromServer.key, keys.audio.fromServer.salt);
+        const videoIn = await createContext(keys.video.fromServer.key, keys.video.fromServer.salt);
+        // A video packet, then streaming.
+        ws.deliver(CHANNEL_VIDEO, await videoIn.protectRtp(keyPicturePacket({ stripe: 0, seq: 1, don: 1, frame: 1 })));
+        await until(() => session.stats.videoPackets === 1, 'the video packet');
+        sinks[0].opts.onFirstFrame();
+        strictEqual(session.state, 'streaming');
+        // Sound keeps coming; no more video. The all-media watchdog would stay
+        // fed by the audio, but the video watchdog catches the freeze.
+        for (let seq = 0; seq < 2; seq++) {
+            ws.deliver(CHANNEL_AUDIO, await audio.protectRtp(audioPacket(seq)));
+            await until(() => session.stats.audioPackets === seq + 1, 'the audio packet');
+            pass(1600);
+        }
+        await settle();
+        strictEqual(offers.length, 2, 'the recovery re-offer');
+        strictEqual(session.state, 'streaming');
     });
 
     it('does not re-offer unless it is streaming', async () => {
