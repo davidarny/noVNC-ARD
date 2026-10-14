@@ -503,8 +503,14 @@ export async function startRelay(options = {}) {
         throw new Error(`cannot resolve target host ${targetHost}: ${err.code || err.message}`);
     }
 
+    // High Performance video runs at tens of Mbit/s. The default UDP receive
+    // buffer (~768 KB on macOS) holds only a fraction of a second, so a brief
+    // event-loop stall overflows it and the kernel drops packets — a lost
+    // picture the HEVC stream cannot decode past. Ask for a large buffer
+    // (the kernel caps it at kern.ipc.maxsockbuf).
+    const UDP_RECV_BUFFER = 8 * 1024 * 1024;
     const bindUdp = port => new Promise((resolve, reject) => {
-        const socket = dgram.createSocket('udp4');
+        const socket = dgram.createSocket({ type: 'udp4', recvBufferSize: UDP_RECV_BUFFER });
         socket.once('error', (err) => {
             socket.close();
             reject(new Error(`cannot bind UDP port ${port}: ${err.code || err.message}`));
@@ -512,6 +518,9 @@ export async function startRelay(options = {}) {
         socket.bind(port, '0.0.0.0', () => {
             socket.removeAllListeners('error');
             socket.on('error', err => log(`udp: port ${socket.address().port}: ${err.message}`));
+            let got = 0;
+            try { got = socket.getRecvBufferSize(); } catch (e) { /* not available */ }
+            log(`udp: port ${socket.address().port} recv buffer ${got} B`);
             resolve(socket);
         });
     });
