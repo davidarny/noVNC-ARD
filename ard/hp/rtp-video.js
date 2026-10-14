@@ -158,6 +158,15 @@ export class VideoAssembler {
         };
     }
 
+    // A snapshot of where the assembler is, for diagnosing a freeze.
+    get diag() {
+        return {
+            buffered: this._pictures.size, next: this._next, highest: this._highest,
+            stalled: this._stalled, ignored: this.stats.ignored, malformed: this.stats.malformed,
+            duplicates: this.stats.duplicates, emitted: this.stats.pictures,
+        };
+    }
+
     // One decrypted RTP packet. The marker bit is not needed: the extension
     // carries the picture's packet count.
     push({ ssrc, seq, extension, payload }, nowMs) {

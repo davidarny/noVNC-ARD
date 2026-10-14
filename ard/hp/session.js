@@ -382,7 +382,23 @@ export class HpSession {
     // A glitch while streaming: re-offer to restart the media on the open
     // connection rather than end High Performance, up to the cap. The old
     // picture stays, blurred, until the new stream has one.
+    // Where the video pipeline is, for diagnosing why it stopped.
+    _diagLine() {
+        const a = (this._assembler && this._assembler.diag) || {};
+        const ss = (this._sink && this._sink.stats) || {};
+        const backlog = (this._sink && this._sink.backlog) || 0;
+        return 'decrypting=' + this._decrypting + ' authFail=' + this.stats.authFailures +
+            ' vpkts=' + this.stats.videoPackets + ' pics=' + this.stats.pictures +
+            ' | asm buffered=' + a.buffered + ' next=' + a.next + ' highest=' + a.highest +
+            ' stalled=' + a.stalled + ' ignored=' + a.ignored + ' malformed=' + a.malformed +
+            ' dup=' + a.duplicates + ' emitted=' + a.emitted +
+            ' | sink submitted=' + ss.submitted + ' decoded=' + ss.decoded +
+            ' dropped=' + ss.dropped + ' backlog=' + backlog;
+    }
+
     _streamingFail(reason, detail) {
+        // Log the pipeline state at the moment of trouble, to show the stage.
+        this._log('glitch ' + reason + (detail ? ' (' + detail + ')' : '') + ' — ' + this._diagLine());
         // A re-offer (resize or an earlier recovery) is already in flight and
         // will replace the stream; a glitch from the old one meanwhile — the
         // old assembler stalling, say — is its to resolve, not a reason to end.
