@@ -647,21 +647,12 @@ describe('High Performance session', () => {
         strictEqual(session.state, 'failed');
     });
 
-    it('fails when the server stops sending, and not while sound still arrives', async () => {
-        const keys = await negotiate();
-        const audio = await createContext(keys.audio.fromServer.key, keys.audio.fromServer.salt);
+    it('recovers when the picture freezes, then falls back if that brings nothing', async () => {
+        await negotiate();
         sinks[0].opts.onFirstFrame();
-
-        // Nothing on the screen moves, but the sound packets keep coming.
-        for (let seq = 0; seq < 4; seq++) {
-            ws.deliver(CHANNEL_AUDIO, await audio.protectRtp(audioPacket(seq)));
-            await until(() => session.stats.audioPackets === seq + 1, 'the audio packet');
-            pass(2500);
-            strictEqual(session.state, 'streaming');
-        }
-
-        // Then nothing at all: it re-offers to recover, still streaming.
-        pass(600);
+        strictEqual(session.state, 'streaming');
+        // No new picture completes: it re-offers to recover, still streaming.
+        pass(3100);
         await settle();
         strictEqual(offers.length, 2, 'the recovery re-offer');
         strictEqual(session.state, 'streaming');

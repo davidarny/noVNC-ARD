@@ -50,10 +50,12 @@ const OVERLOAD_MS = 2000;
 const MEDIA_SILENCE_MS = 3000;
 
 // The server sends video continuously in High Performance, even an idle
-// screen (40-400 kbit/s). So no video for this long means it has stopped,
-// and because sound keeps the all-media watchdog fed, the picture would sit
-// frozen while the audio plays on. This catches that on its own.
-const VIDEO_SILENCE_MS = 3000;
+// screen. So this long with no new *completed picture* — whether the packets
+// stopped, or they keep coming but the assembler cannot finish a picture
+// (a lost stripe), or the decoder is starved — means the picture is frozen.
+// Watching finished pictures, not packets, catches a freeze that still has a
+// full byte stream (seen at the largest sizes, with sound masking it).
+const PICTURE_STALL_MS = 3000;
 
 // After a resize, how long to keep the old picture (blurred) waiting for the
 // new one to be fully drawn before showing the new stream regardless.
@@ -145,6 +147,7 @@ export class HpSession {
         this._audioSeq = new SeqTracker();
         this._videoSeq = new SeqTracker();
         this._lastVideoPacketAt = null;
+        this._lastPictureAt = null;              // when a picture last completed
         this._lastMediaAt = null;                // last packet of either stream that verified
         this._lastSenderReport = [null, null];   // per channel: { middle, at }
         this._decrypting = 0;                    // packets handed to SRTP and not back yet
@@ -478,6 +481,7 @@ export class HpSession {
         // window so the gap of the mode switch does not trip them.
         this._lastMediaAt = this._now();
         this._lastVideoPacketAt = this._now();
+        this._lastPictureAt = this._now();
         // The audio stream restarts with a new SSRC and sequence; let its
         // reorder take the new numbers, or every packet reads as late.
         if (this._audio && this._audio.resetStream) this._audio.resetStream();
@@ -511,7 +515,10 @@ export class HpSession {
             height: answer.video.height,
             stripes: answer.video.stripes,
             onFirstFrame: () => {
-                if (this.state === 'waiting') this._setState('streaming');
+                if (this.state === 'waiting') {
+                    this._lastPictureAt = this._now();
+                    this._setState('streaming');
+                }
             },
             onError: reason => this._fail('decoder', reason),
         });
@@ -609,6 +616,7 @@ export class HpSession {
 
     _onPicture(picture) {
         this.stats.pictures++;
+        this._lastPictureAt = this._now();
         if (picture.key) this.stats.keyPictures++;
         if (this._sink) this._sink.push(picture);
         if (this._feedback.acks) {
@@ -660,10 +668,10 @@ export class HpSession {
             now - this._lastMediaAt > MEDIA_SILENCE_MS) {
             this._streamingFail('media-stopped');
         }
-        // Video stopped while sound carried on: the picture is frozen.
-        if (this.state === 'streaming' && !this._reoffering && this._lastVideoPacketAt !== null &&
-            now - this._lastVideoPacketAt > VIDEO_SILENCE_MS) {
-            this._streamingFail('media-stopped', 'video stopped');
+        // No finished picture for a while — frozen, even if bytes still flow.
+        if (this.state === 'streaming' && !this._reoffering && this._lastPictureAt !== null &&
+            now - this._lastPictureAt > PICTURE_STALL_MS) {
+            this._streamingFail('stalled', 'no new picture');
         }
         if (!this._feedback.rateControl || this.state === 'failed') return;
         const sinceLast = this._lastVideoPacketAt === null ? 0 : now - this._lastVideoPacketAt;
