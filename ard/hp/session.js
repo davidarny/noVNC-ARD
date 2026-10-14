@@ -394,7 +394,7 @@ export class HpSession {
             ' vpkts=' + this.stats.videoPackets + ' pics=' + this.stats.pictures +
             ' | asm buffered=' + a.buffered + ' next=' + a.next +
             ' stalled=' + a.stalled + ' ignored=' + a.ignored + ' malformed=' + a.malformed +
-            ' dup=' + a.duplicates + ' emitted=' + a.emitted +
+            ' dup=' + a.duplicates + ' emitted=' + a.emitted + ' skipped=' + a.skipped +
             ' | sink submitted=' + ss.submitted + ' decoded=' + ss.decoded +
             ' dropped=' + ss.dropped + ' backlog=' + backlog;
     }

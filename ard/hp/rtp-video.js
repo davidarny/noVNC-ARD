@@ -9,8 +9,11 @@
  *
  * The assembler collects the packets of each picture in any arrival order,
  * rebuilds its NAL units and emits the pictures strictly in DON order,
- * starting at the first key picture. Nothing is retransmitted, so a picture
- * that stays missing ends the stream: onStall fires once and emission stops.
+ * starting at the first key picture. Nothing is retransmitted. A picture that
+ * stays missing no longer ends the stream: when emission would stall, the
+ * assembler resyncs forward to the nearest complete key picture — an IRAP is a
+ * random-access point, decodable with no predecessor — dropping the gap. Only
+ * when no key picture is buffered does onStall fire and emission stop.
  *
  * Payloads are kept by reference until their picture is emitted or dropped.
  */
@@ -155,6 +158,7 @@ export class VideoAssembler {
             duplicates: 0,      // packet already held or its picture already emitted
             pictures: 0,        // emitted
             discarded: 0,       // dropped for preceding the first key picture
+            skipped: 0,         // dropped by a resync forward past a missing picture
         };
     }
 
@@ -164,6 +168,7 @@ export class VideoAssembler {
             buffered: this._pictures.size, next: this._next,
             stalled: this._stalled, ignored: this.stats.ignored, malformed: this.stats.malformed,
             duplicates: this.stats.duplicates, emitted: this.stats.pictures,
+            skipped: this.stats.skipped,
         };
     }
 
@@ -299,9 +304,39 @@ export class VideoAssembler {
         }
         if (!stall) return;
 
+        // A missing picture no longer ends the stream: resync forward to the
+        // nearest complete key picture and resume. Only when there is no key
+        // picture to land on does emission give up.
+        if (this._next !== null && this._resyncToKey()) return;
+
         this._stalled = true;
         const buffered = this._pictures.size;
         this._pictures.clear();
         this._onStall({ expectedDon: this._next, buffered });
+    }
+
+    // Restart emission at the earliest complete key picture after _next,
+    // discarding the stuck gap before it. An IRAP decodes with no predecessor,
+    // so the stream continues past an unrecoverable loss instead of stalling.
+    // Returns true when it resynced, false when no key picture is buffered.
+    _resyncToKey() {
+        let keyDon = null;
+        for (const pic of this._pictures.values()) {
+            if (pic.data !== null && pic.key && pic.don > this._next &&
+                (keyDon === null || pic.don < keyDon)) {
+                keyDon = pic.don;
+            }
+        }
+        if (keyDon === null) return false;
+
+        for (const don of this._pictures.keys()) {
+            if (don < keyDon) {
+                this._pictures.delete(don);
+                this.stats.skipped++;
+            }
+        }
+        this._next = keyDon;
+        this._emit();
+        return true;
     }
 }
