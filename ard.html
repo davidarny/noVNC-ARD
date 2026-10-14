@@ -328,16 +328,19 @@
         // ardHpAudio: false leaves the Mac's sound unplayed
         const ardHpAudio = getParamCI('ardHpAudio') !== 'false';
         // ardHpShowLocalCursor: High Performance bakes the cursor into the video
-        // on a virtual display, so the client cursor is hidden by default to
-        // avoid a double (Apple's own viewer shows the one in the video). The
-        // advanced "Show local cursor" checkbox — or ?ardHpShowLocalCursor=1/0 —
-        // draws the client cursor anyway. Persisted in localStorage.
+        // on a virtual display. Apple's own viewer also draws the smooth local
+        // cursor on top, so by DEFAULT we show both (the baked video cursor plus
+        // the responsive client cursor). The advanced "Show local cursor"
+        // checkbox — or ?ardHpShowLocalCursor=1/0 — overrides; only an explicit
+        // '0' hides the local cursor. Persisted in localStorage.
         const ardHpShowLocalCursorParam = getParamCI('ardHpShowLocalCursor');
         function ardHpShowLocalCursor() {
             if (ardHpShowLocalCursorParam === '1') return true;
             if (ardHpShowLocalCursorParam === '0') return false;
             const el = document.getElementById('noVNC_setting_ardHpShowLocalCursor');
-            return !!(el && el.checked);
+            if (el) return !!el.checked;
+            // No checkbox yet (early call): default ON unless explicitly stored '0'.
+            try { return localStorage.getItem('ardHpShowLocalCursor') !== '0'; } catch (e) { return true; }
         }
         let ardHpSupported = false;
         let ardHpDisabled = false;
@@ -1023,9 +1026,9 @@
                 }
             });
 
-        // Show local cursor (High Performance): hidden by default (the video
-        // carries the cursor on a virtual display). Persist the choice and
-        // apply it to a live session on toggle.
+        // Show local cursor (High Performance): shown by default (both the
+        // baked video cursor and the local one, like Apple). Persist the choice
+        // and apply it to a live session on toggle.
         (function () {
             const el = document.getElementById('noVNC_setting_ardHpShowLocalCursor');
             if (!el) return;
@@ -1033,9 +1036,10 @@
                 if (ardHpShowLocalCursorParam === '1' || ardHpShowLocalCursorParam === '0') {
                     el.checked = ardHpShowLocalCursorParam === '1';
                 } else {
-                    el.checked = localStorage.getItem('ardHpShowLocalCursor') === '1';
+                    // Default ON — only an explicit stored '0' turns it off.
+                    el.checked = localStorage.getItem('ardHpShowLocalCursor') !== '0';
                 }
-            } catch (e) { /* storage blocked — leave unchecked */ }
+            } catch (e) { el.checked = true; /* storage blocked — default ON */ }
             el.addEventListener('change', () => {
                 try {
                     localStorage.setItem('ardHpShowLocalCursor', el.checked ? '1' : '0');
