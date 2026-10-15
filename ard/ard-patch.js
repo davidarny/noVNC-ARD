@@ -151,6 +151,9 @@ RFB.prototype._negotiateProtocolVersion = function () {
             this._ardVirtualDisplayAsked = false;   // message 0x1d was sent
             this._ardVirtualLogin = this._ardVirtualLogin ?? 1; // 0=always share, 1=show picker, 2=always virtual
             this._ardDeferredFBURequest = false;
+            // The server pushes updates (AutoFBUpdate), so noVNC's own
+            // incremental request after every update is not sent.
+            this._sock._ardPushUpdates = true;
 
             // Message dispatch state: tracks type byte across partial reads
             this._ardPendingMsgType = null;
@@ -168,8 +171,6 @@ RFB.prototype._negotiateProtocolVersion = function () {
             // all of them combined. Decided once, when the list arrives.
             this._ardAutoSelectDisplay = this._ardAutoSelectDisplay ?? true;
             this._ardDisplayAutoSelected = false;
-            // Display id the server last said it is sending
-            this._ardShownDisplay = null;
             this._ardRemoteUser = '';
             this._ardUserAvatarPng = null;
             this._ardDeviceInfo = null;
@@ -584,10 +585,11 @@ RFB.prototype._normalMsg = function () {
         this._enableStreamEncryption(pending.key, pending.iv);
     }
 
-    // After each completed FBU, re-subscribe to AutoFBUpdate so the
-    // server keeps pushing frames. Without this the server's subscription
-    // silently expires after a few seconds of C→S silence.
-    if (this._rfbAppleARD && this._FBU.rects === 0 &&
+    // In High Performance, renew AutoFBUpdate after each completed FBU: the
+    // cursor froze after ~3s without it. An ordinary session needs no
+    // renewal; the server keeps pushing with nothing from the viewer, and
+    // Apple's viewer sends nothing.
+    if (this._rfbAppleARD && this._sock._ardHpQuiet && this._FBU.rects === 0 &&
         this._fbWidth > 0 && this._fbHeight > 0) {
         RFB.messages.ardAutoFBUpdate(this._sock, 1,
             0, 0, this._fbWidth, this._fbHeight);
@@ -650,9 +652,11 @@ RFB.prototype._ardHandleStateChange = function () {
             break;
 
         case stateTickle:
-            // Server stops pushing FBUs after ~3s of C→S silence and
-            // sends Tickles waiting for a response. AutoFBUpdate tells
-            // it the client is alive and streaming should resume.
+            // The server sends a Tickle every ~2s while it has nothing else
+            // to send. After the screen locks and unlocks it can stop
+            // pushing updates and send only Tickles; AutoFBUpdate starts
+            // them again. While updates flow no Tickles come, so this costs
+            // nothing then.
             if (this._fbWidth > 0 && this._fbHeight > 0) {
                 RFB.messages.ardAutoFBUpdate(this._sock, 1,
                     0, 0, this._fbWidth, this._fbHeight);
@@ -1123,13 +1127,12 @@ RFB.prototype._ardApplyDisplayInfo2 = function (info, rectW, rectH) {
 
     if (info === null) return;
 
-    // The server is now sending another display, or the same one at
-    // another size: ask for the whole picture once. While the first
-    // request of the session is still deferred, that one covers it.
-    const switched = this._ardShownDisplay !== null &&
-                     this._ardShownDisplay !== info.displayId;
-    this._ardShownDisplay = info.displayId;
-    if ((resized || switched) && !this._ardDeferredFBURequest &&
+    // Ask for the whole picture after every DisplayInfo2, as Apple's viewer
+    // does. The server sends one whenever what it shows changes (another
+    // display, a new size, the screen locking or unlocking) and may push
+    // nothing more until asked. While the first request of the session is
+    // still deferred, that one covers it.
+    if (!this._ardDeferredFBURequest &&
         this._rfbConnectionState === 'connected' &&
         this._fbWidth > 0 && this._fbHeight > 0) {
         RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
@@ -1766,10 +1769,13 @@ RFB.prototype._ardHandleMediaStreamRect = function (which) {
 // places, noVNC's own update loop among them, so the check sits here. The
 // AutoFBUpdate subscription (0x09) is deliberately NOT gated this way — it must
 // stay alive in HP to keep cursor-shape rects flowing (see ardAutoFBUpdate).
+// On any ARD connection incremental requests are dropped as well: the server
+// pushes updates once AutoFBUpdate is on, and Apple's viewer never sends one.
 const _origFbUpdateRequest = RFB.messages.fbUpdateRequest;
-RFB.messages.fbUpdateRequest = function (sock, ...args) {
+RFB.messages.fbUpdateRequest = function (sock, incremental, ...args) {
     if (sock._ardHpQuiet) return;
-    return _origFbUpdateRequest.call(RFB.messages, sock, ...args);
+    if (sock._ardPushUpdates && incremental) return;
+    return _origFbUpdateRequest.call(RFB.messages, sock, incremental, ...args);
 };
 
 RFB.prototype._updateConnectionState = function (state) {
@@ -2588,11 +2594,14 @@ RFB.messages.ardSetDisplay = function (sock, displayId = null) {
 //                      [u16be x][u16be y][u16be w][u16be h] = 16 bytes
 // Tells the server to automatically push framebuffer updates
 // without waiting for explicit FBUpdateRequests. This is the subscription
-// that carries cursor-shape rects (1104/1100) and DisplayInfo2 on TCP, and
-// it lapses after ~3s of C→S silence unless renewed (per completed FBU and in
-// reply to a Tickle). It is NOT gated on _ardHpQuiet: in High Performance the
-// server pushes only those small control rects over TCP (the picture is HEVC
-// over UDP), so keeping the subscription alive is what keeps the cursor live.
+// that carries cursor-shape rects (1104/1100) and DisplayInfo2 on TCP.
+// Sent with each full update request (connect, quality or display change),
+// as Apple's viewer does, and in reply to every Tickle, which restarts updates
+// the server stopped across a screen lock. enabled=0 stops all updates until
+// re-enabled. It is NOT gated on _ardHpQuiet: in High Performance the server
+// pushes only those small control rects over TCP (the picture is HEVC over
+// UDP), and there it is also renewed per completed FBU, since the cursor
+// froze after ~3s without that.
 RFB.messages.ardAutoFBUpdate = function (sock, enabled, x, y, w, h) {
     sock.sQpush8(msgTypeAutoFBUpdate);  // 0x09
     sock.sQpush8(0);                    // padding
