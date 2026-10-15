@@ -132,7 +132,7 @@ describe('VideoAssembler payload formats', () => {
             don: 4000, stripe: 0, frame: 9, key: true, data: annexB(idr),
         });
         deepStrictEqual(h.asm.stats, {
-            packets: 1, ignored: 0, malformed: 0, duplicates: 0, pictures: 1, discarded: 0,
+            packets: 1, ignored: 0, malformed: 0, duplicates: 0, pictures: 1, discarded: 0, skipped: 0,
         });
     });
 
@@ -642,7 +642,7 @@ describe('VideoAssembler malformed input', () => {
         pushRaw(h, new Uint8Array(0));
         h.push([{ ...keyPicture(2)[0], ssrc: 1 }]);
         deepStrictEqual(h.asm.stats, {
-            packets: 3, ignored: 1, malformed: 1, duplicates: 0, pictures: 1, discarded: 0,
+            packets: 3, ignored: 1, malformed: 1, duplicates: 0, pictures: 1, discarded: 0, skipped: 0,
         });
     });
 });
