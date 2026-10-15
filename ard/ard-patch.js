@@ -19,7 +19,6 @@ import * as Log from '../noVNC/core/util/logging.js';
 import { clientToElement } from '../noVNC/core/util/element.js';
 import { encodeUTF8, decodeUTF8 } from '../noVNC/core/util/strings.js';
 import { encodings } from '../noVNC/core/encodings.js';
-import keysyms from '../noVNC/core/input/keysymdef.js';
 import legacyCrypto from '../noVNC/core/crypto/crypto.js';
 import { RSACipher } from '../noVNC/core/crypto/rsa.js';
 import Inflator from '../noVNC/core/inflator.js';
@@ -36,6 +35,7 @@ import ArdMVSDecoder from './decoders/mvs.js';
 import { parseDisplayInfo2, setDisplayBytes, displayRole,
          reconcileSelection } from './display-info.js';
 import { sessionCommand, sessionSelectAction } from './session-select.js';
+import { ardKeysym } from './keysyms.js';
 import { HpSession } from './hp/session.js';
 import { VideoSink } from './hp/video-sink.js';
 import { buildVirtualDisplayMessage, virtualDisplayFor } from './hp/virtual-display.js';
@@ -91,15 +91,6 @@ import {
     sessionStatusGrantedAfterPending,
     clipboardFormatUTF8,
 } from './ard-constants.js';
-
-// Use Unicode keysyms for Cyrillic on Apple's ARD server.
-const ARD_CYRILLIC_KEYSYMS = new Map();
-for (let codepoint = 0x0400; codepoint <= 0x04FF; codepoint++) {
-    const keysym = keysyms.lookup(codepoint);
-    if (keysym < 0x01000000) {
-        ARD_CYRILLIC_KEYSYMS.set(keysym, 0x01000000 | codepoint);
-    }
-}
 
 // ===== Save original methods =====
 
@@ -1903,8 +1894,9 @@ RFB.prototype._buildEncryptedKeyPayload = function (keysym, down) {
 
 // Patch sendKey — intercept for EncryptedEvent when applicable
 RFB.prototype.sendKey = function (keysym, code, down) {
+    // Characters above Latin-1 go as Unicode keysyms (see keysyms.js)
     if (this._rfbAppleARD) {
-        keysym = ARD_CYRILLIC_KEYSYMS.get(keysym) ?? keysym;
+        keysym = ardKeysym(keysym);
     }
     if (this._rfbAppleARD && this._ardAuthKey && !this._ardEncryptionEnabled) {
         if (this._rfbConnectionState !== 'connected' || this._viewOnly) { return; }

@@ -33,6 +33,7 @@ A browser-based client for macOS Screen Sharing (protocol version `003.889`). Al
 
 **Keyboard**
 - Double-backtick shortcut for full screen refresh
+- Characters beyond Latin-1 (Greek, Cyrillic, Hebrew, Arabic, Thai, kana, symbols) sent as Unicode keysyms, which Apple's server accepts
 
 ## Quick Start
 
@@ -196,6 +197,7 @@ noVNC-ARD/
     ard-constants.js            encoding IDs, message types, status codes
     ard-patch.js                monkey-patches RFB prototype for ARD support
     display-info.js             display list, display selection (no browser dependencies)
+    keysyms.js                  Unicode keysyms for Apple's server (no browser dependencies)
     crypto/
       aes128.js                 AES-128 (ECB + CBC modes)
       sha1.js                   SHA-1 hash
@@ -222,6 +224,7 @@ noVNC-ARD/
     tests/
       test.crypto.js            AES, SHA-1, PKCS#1 tests (FIPS/NIST vectors)
       test.display-info.js      display list and display selection tests
+      test.keysyms.js           keysym conversion tests
       test.mvs.js               MVS decoder tests (hand-built bitstreams)
       test.version.js           version format test
       test.wire.js              ARD wire format and message builder tests
@@ -242,6 +245,7 @@ node --test ard/tests/test.crypto.js         # crypto primitives
 node --test ard/tests/test.wire.js           # wire format + message builders
 node --test ard/tests/test.mvs.js            # MVS decoder
 node --test ard/tests/test.display-info.js   # display list + selection
+node --test ard/tests/test.keysyms.js        # keysyms for Apple's server
 node --test ard/tests/test.hp-*.js           # High Performance mode
 node --test relay/test.relay.js              # relay
 ```
