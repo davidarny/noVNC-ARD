@@ -19,7 +19,6 @@ import * as Log from '../noVNC/core/util/logging.js';
 import { clientToElement } from '../noVNC/core/util/element.js';
 import { encodeUTF8, decodeUTF8 } from '../noVNC/core/util/strings.js';
 import { encodings } from '../noVNC/core/encodings.js';
-import keysyms from '../noVNC/core/input/keysymdef.js';
 import legacyCrypto from '../noVNC/core/crypto/crypto.js';
 import { RSACipher } from '../noVNC/core/crypto/rsa.js';
 import Inflator from '../noVNC/core/inflator.js';
@@ -35,12 +34,20 @@ import ArdThousandsDecoder from './decoders/zlib-thousands.js';
 import ArdMVSDecoder from './decoders/mvs.js';
 import { parseDisplayInfo2, setDisplayBytes, displayRole,
          reconcileSelection } from './display-info.js';
+import { sessionCommand, sessionSelectAction } from './session-select.js';
+import { ardKeysym } from './keysyms.js';
+import { HpSession } from './hp/session.js';
+import { VideoSink } from './hp/video-sink.js';
+import { buildVirtualDisplayMessage, virtualDisplayFor } from './hp/virtual-display.js';
+import { offersHighPerformance } from './hp/capability.js';
 
 import {
     encodingArdHalftone,
     encodingArdGray16,
     encodingArdThousands,
     encodingArdMVS,
+    encodingArdProMode,
+    pseudoEncodingArdMediaStream,
     clientInitARD,
     securityTypeRSATunnel,
     serverFlagSessionSelect,
@@ -76,7 +83,6 @@ import {
     stateWake,
     stateCursorHidden,
     stateCursorVisible,
-    sessionCmdRequestConsole,
     sessionCmdConnectToConsole,
     sessionCmdConnectToVirtualDisplay,
     sessionStatusGranted,
@@ -85,15 +91,6 @@ import {
     sessionStatusGrantedAfterPending,
     clipboardFormatUTF8,
 } from './ard-constants.js';
-
-// Use Unicode keysyms for Cyrillic on Apple's ARD server.
-const ARD_CYRILLIC_KEYSYMS = new Map();
-for (let codepoint = 0x0400; codepoint <= 0x04FF; codepoint++) {
-    const keysym = keysyms.lookup(codepoint);
-    if (keysym < 0x01000000) {
-        ARD_CYRILLIC_KEYSYMS.set(keysym, 0x01000000 | codepoint);
-    }
-}
 
 // ===== Save original methods =====
 
@@ -104,6 +101,7 @@ const _origNegotiateServerInit = RFB.prototype._negotiateServerInit;
 const _origSendEncodings = RFB.prototype._sendEncodings;
 const _origNormalMsg = RFB.prototype._normalMsg;
 const _origHandleRect = RFB.prototype._handleRect;
+const _origUpdateConnectionState = RFB.prototype._updateConnectionState;
 const _origHandleSecurityResult = RFB.prototype._handleSecurityResult;
 const _origSendKey = RFB.prototype.sendKey;
 const _origIsSupportedSecurityType = RFB.prototype._isSupportedSecurityType;
@@ -151,8 +149,12 @@ RFB.prototype._negotiateProtocolVersion = function () {
             this._ardSessionSelectStage = null;
             this._ardSessionSelectConsoleUser = '';
             this._ardSessionType = null;  // 1=ShareDisplay, 2=VirtualDisplay
+            this._ardVirtualDisplayAsked = false;   // message 0x1d was sent
             this._ardVirtualLogin = this._ardVirtualLogin ?? 1; // 0=always share, 1=show picker, 2=always virtual
             this._ardDeferredFBURequest = false;
+            // The server pushes updates (AutoFBUpdate), so noVNC's own
+            // incremental request after every update is not sent.
+            this._sock._ardPushUpdates = true;
 
             // Message dispatch state: tracks type byte across partial reads
             this._ardPendingMsgType = null;
@@ -170,8 +172,6 @@ RFB.prototype._negotiateProtocolVersion = function () {
             // all of them combined. Decided once, when the list arrives.
             this._ardAutoSelectDisplay = this._ardAutoSelectDisplay ?? true;
             this._ardDisplayAutoSelected = false;
-            // Display id the server last said it is sending
-            this._ardShownDisplay = null;
             this._ardRemoteUser = '';
             this._ardUserAvatarPng = null;
             this._ardDeviceInfo = null;
@@ -293,6 +293,9 @@ RFB.prototype._initMsg = function () {
     if (this._rfbInitState === 'ArdSessionSelect' && this._rfbAppleARD) {
         return this._ardSessionSelect();
     }
+    if (this._rfbInitState === 'ArdSessionChoice' && this._rfbAppleARD) {
+        return false; // Blocked — waiting for the page to call ardContinueSession()
+    }
     return _origInitMsg.call(this);
 };
 
@@ -346,6 +349,8 @@ RFB.prototype._negotiateServerInit = function () {
 
         Log.Info("ARD: Extended ServerInit — flags=0x" +
                  this._ardServerFlags.toString(16).padStart(8, '0') +
+                 ", capabilities=" + Array.from(this._ardCapabilityBitmap,
+                                                b => b.toString(16).padStart(2, '0')).join('') +
                  ", sessionSelect=" + this._ardSessionSelectNeeded +
                  ", name=" + name);
     } else {
@@ -355,6 +360,7 @@ RFB.prototype._negotiateServerInit = function () {
     }
 
     name = decodeUTF8(name, true);
+    this._ardServerInitSeen = true;     // what the server offers is known from here on
 
     Log.Info("ARD: Screen " + width + "x" + height + ", name: " + name);
 
@@ -377,12 +383,24 @@ RFB.prototype._negotiateServerInit = function () {
     }
 
 
-    // Normal (non-session-select) path — matches ARD init order:
-    // ViewerInfo → SetMode → SetDisplay → AutoPasteboard
-    // → SetEncodings → PixelFormat → SetEncodings
-    // → SetEncryption → FBUpdateRequest
+    // The page may want to ask the user what kind of session to open, now
+    // that the server has introduced itself and before anything is asked
+    // of it. Apple's viewer shows its choice of screen sharing type here.
+    if (this._ardPauseForSessionChoice(() => this._ardNormalInit(width, height))) {
+        return true;
+    }
+    return this._ardNormalInit(width, height);
+};
+
+// What is asked of the server once the session is open, in ARD's order:
+// ViewerInfo → SetMode → VirtualDisplay (High Performance) → SetDisplay
+// → AutoPasteboard → SetEncodings → PixelFormat → SetEncodings
+// → SetEncryption. The first framebuffer update request follows, when the
+// size of the screen is known.
+RFB.prototype._ardSendSessionSetup = function () {
     RFB.messages.ardViewerInfo(this._sock);
     RFB.messages.ardSetMode(this._sock, this._ardControlMode || 1);
+    this._ardHpRequestVirtualDisplay();
     RFB.messages.ardSetDisplay(this._sock, this._ardSelectedDisplay);
     RFB.messages.ardAutoPasteboard(this._sock, 1);
     this._sendEncodings();
@@ -396,6 +414,11 @@ RFB.prototype._negotiateServerInit = function () {
     } else if (this._ardAuthKey) {
         Log.Info("ARD: Keystroke-only encryption mode — skipping tunnel encryption");
     }
+};
+
+// Normal (non-session-select) path
+RFB.prototype._ardNormalInit = function (width, height) {
+    this._ardSendSessionSetup();
 
     // CRITICAL: Never send FBUpdateRequest with 0x0 dimensions —
     // causes the macOS Screen Sharing server to hang in zlib deflate infinite loop
@@ -420,6 +443,15 @@ RFB.prototype._sendEncodings = function () {
 
     const encs = [];
 
+    // High Performance: 1010 first and 1110 last ask the server to open the
+    // media stream negotiation. The pixel encodings are those of 'adaptive',
+    // which the server uses until the media starts, and if it never does.
+    const highPerf = this._ardHpWanted();
+    if (highPerf) {
+        encs.push(encodingArdProMode);
+    }
+    const preset = this._ardQualityPreset === 'highperf' ? 'adaptive' : this._ardQualityPreset;
+
     // Data encodings per quality preset — order matters: server uses first supported
     const presetEncodings = {
         halftone:  [encodingArdHalftone, encodings.encodingZRLE, encodings.encodingZlib, encodings.encodingRaw],
@@ -428,7 +460,7 @@ RFB.prototype._sendEncodings = function () {
         millions:  [encodings.encodingZRLE, encodings.encodingZlib, encodings.encodingRaw],
         adaptive:  [encodingArdMVS, encodingArdThousands, encodings.encodingZRLE, encodings.encodingZlib, encodings.encodingRaw],
     };
-    const imageEncs = presetEncodings[this._ardQualityPreset] || presetEncodings.adaptive;
+    const imageEncs = presetEncodings[preset] || presetEncodings.adaptive;
     for (const enc of imageEncs) {
         encs.push(enc);
     }
@@ -455,7 +487,15 @@ RFB.prototype._sendEncodings = function () {
     encs.push(encodings.pseudoEncodingLastRect);
     encs.push(encodings.pseudoEncodingCursor);
 
+    if (highPerf) {
+        encs.push(pseudoEncodingArdMediaStream);
+    }
+
     RFB.messages.clientEncodings(this._sock, encs);
+
+    if (highPerf) {
+        this._ardHpStart();
+    }
 };
 
 // ===== (e) S→C message dispatch =====
@@ -546,10 +586,11 @@ RFB.prototype._normalMsg = function () {
         this._enableStreamEncryption(pending.key, pending.iv);
     }
 
-    // After each completed FBU, re-subscribe to AutoFBUpdate so the
-    // server keeps pushing frames. Without this the server's subscription
-    // silently expires after a few seconds of C→S silence.
-    if (this._rfbAppleARD && this._FBU.rects === 0 &&
+    // In High Performance, renew AutoFBUpdate after each completed FBU: the
+    // cursor froze after ~3s without it. An ordinary session needs no
+    // renewal; the server keeps pushing with nothing from the viewer, and
+    // Apple's viewer sends nothing.
+    if (this._rfbAppleARD && this._sock._ardHpQuiet && this._FBU.rects === 0 &&
         this._fbWidth > 0 && this._fbHeight > 0) {
         RFB.messages.ardAutoFBUpdate(this._sock, 1,
             0, 0, this._fbWidth, this._fbHeight);
@@ -612,9 +653,11 @@ RFB.prototype._ardHandleStateChange = function () {
             break;
 
         case stateTickle:
-            // Server stops pushing FBUs after ~3s of C→S silence and
-            // sends Tickles waiting for a response. AutoFBUpdate tells
-            // it the client is alive and streaming should resume.
+            // The server sends a Tickle every ~2s while it has nothing else
+            // to send. After the screen locks and unlocks it can stop
+            // pushing updates and send only Tickles; AutoFBUpdate starts
+            // them again. While updates flow no Tickles come, so this costs
+            // nothing then.
             if (this._fbWidth > 0 && this._fbHeight > 0) {
                 RFB.messages.ardAutoFBUpdate(this._sock, 1,
                     0, 0, this._fbWidth, this._fbHeight);
@@ -759,36 +802,32 @@ RFB.prototype._ardSessionSelect = function () {
                      ", user=" + user);
 
             this._ardSessionSelectConsoleUser = user;
+            this._ardSessionAllowedCmds = allowedCmds;
 
             // virtualLogin: 0=always share display, 1=show picker, 2=always virtual
             const vl = this._ardVirtualLogin;
+            const action = sessionSelectAction({
+                virtualLogin: vl,
+                consoleUser: user,
+                allowedCmds,
+                pageAsks: !!this._ardAskSessionChoice && !this._ardSessionChoiceMade,
+            });
 
-            if (vl === 0 || vl === 2) {
-                // Auto-select based on setting
-                const cmd = (vl === 2)
-                    ? sessionCmdConnectToVirtualDisplay
-                    : sessionCmdConnectToConsole;
-                this._ardSessionType = cmd;
-                RFB.messages.ardSessionCommand(this._sock, cmd, user);
-                Log.Info("ARD: SessionSelect — auto-sent command " + cmd +
+            if (action.ask) {
+                // Someone is using the display, or the page has its own
+                // question to put: the UI says which session type to use
+                this.dispatchEvent(new CustomEvent('ardsessionselect', {
+                    detail: { username: user, allowedCommands: allowedCmds, hasConsoleUser: !!user }
+                }));
+                Log.Info("ARD: SessionSelect — dispatched ardsessionselect event" +
+                         (user ? " for user " + user : " (no console user)"));
+                this._ardSessionSelectStage = 'waitingForUI';
+            } else {
+                this._ardSessionType = action.command;
+                RFB.messages.ardSessionCommand(this._sock, action.command, user);
+                Log.Info("ARD: SessionSelect — auto-sent command " + action.command +
                          " (virtualLogin=" + vl + ", user=" + user + ")");
                 this._ardSessionSelectStage = 'readResult';
-            } else if (!user || user.length === 0) {
-                // No console user — auto-connect to console
-                const cmd = (allowedCmds & (1 << sessionCmdConnectToConsole))
-                    ? sessionCmdConnectToConsole
-                    : sessionCmdRequestConsole;
-                this._ardSessionType = cmd;
-                RFB.messages.ardSessionCommand(this._sock, cmd, user);
-                Log.Info("ARD: SessionSelect — auto-sent command " + cmd + " (no console user)");
-                this._ardSessionSelectStage = 'readResult';
-            } else {
-                // Console user present — ask the UI which session type to use
-                this.dispatchEvent(new CustomEvent('ardsessionselect', {
-                    detail: { username: user, allowedCommands: allowedCmds, hasConsoleUser: true }
-                }));
-                Log.Info("ARD: SessionSelect — dispatched ardsessionselect event for user " + user);
-                this._ardSessionSelectStage = 'waitingForUI';
             }
             return true;
         }
@@ -837,13 +876,55 @@ RFB.prototype._ardSessionSelect = function () {
 
 // Public API: UI calls this to resume session select after user picks a session type.
 // command: 1 = ConnectToConsole (share display), 2 = ConnectToVirtualDisplay
+// ===== Session choice: a pause for the page, after sign-in =====
+//
+// With _ardAskSessionChoice set, the connection stops once the server has
+// sent its ServerInit (and the session has been granted, where the server
+// asks about that) and dispatches 'ardsessionchoice'. The page sets what it
+// wants — quality preset, High Performance — and calls
+// ardContinueSession(). Nothing has been asked of the server yet, so
+// everything can still be decided. A page that answered 'ardsessionselect'
+// has already been asked and is not asked again.
+
+RFB.prototype._ardPauseForSessionChoice = function (resume) {
+    if (!this._ardAskSessionChoice || this._ardSessionChoiceMade) return false;
+    this._ardSessionChoiceResume = resume;
+    this._rfbInitState = 'ArdSessionChoice';
+    Log.Info("ARD: waiting for the session choice");
+    this.dispatchEvent(new CustomEvent('ardsessionchoice', {
+        detail: {
+            serverFlags: this._ardServerFlags,
+            capabilityBitmap: this._ardCapabilityBitmap,
+            username: this._ardSessionSelectConsoleUser || '',
+        }
+    }));
+    return true;
+};
+
+RFB.prototype.ardContinueSession = function () {
+    if (this._rfbInitState !== 'ArdSessionChoice' || !this._ardSessionChoiceResume) {
+        Log.Warn("ardContinueSession called but no session choice is pending");
+        return;
+    }
+    const resume = this._ardSessionChoiceResume;
+    this._ardSessionChoiceResume = null;
+    this._ardSessionChoiceMade = true;
+    resume();
+};
+
 RFB.prototype.selectSessionType = function (command) {
     if (this._ardSessionSelectStage !== 'waitingForUI') {
         Log.Warn("selectSessionType called but not in waitingForUI state");
         return;
     }
-    this._ardSessionType = command;
+    // The page has asked the user; do not ask again once it is granted.
+    this._ardSessionChoiceMade = true;
     const user = this._ardSessionSelectConsoleUser || '';
+    // The Mac's own display, by whichever command this server accepts
+    if (command === sessionCmdConnectToConsole) {
+        command = sessionCommand(false, user, this._ardSessionAllowedCmds);
+    }
+    this._ardSessionType = command;
     RFB.messages.ardSessionCommand(this._sock, command, user);
     Log.Info("ARD: SessionSelect — sent command " + command + " for user " + user);
     this._ardSessionSelectStage = 'readResult';
@@ -853,22 +934,12 @@ RFB.prototype.selectSessionType = function (command) {
 // Post-session-select initialization: send protocol setup messages,
 // then transition to connected WITHOUT sending FBUpdateRequest (0x0 dimensions)
 RFB.prototype._ardPostSessionInit = function () {
+    if (this._ardPauseForSessionChoice(() => this._ardPostSessionInit())) {
+        return;
+    }
     Log.Info("ARD: Session granted — sending protocol setup");
 
-    // Same init order as normal path
-    RFB.messages.ardViewerInfo(this._sock);
-    RFB.messages.ardSetMode(this._sock, this._ardControlMode || 1);
-    RFB.messages.ardSetDisplay(this._sock, this._ardSelectedDisplay);
-    RFB.messages.ardAutoPasteboard(this._sock, 1);
-    this._sendEncodings();
-    RFB.messages.pixelFormat(this._sock, this._fbDepth, true);
-    this._sendEncodings();
-
-    // Request session encryption before FBUpdateRequest
-    if (this._ardAuthKey && this._ardEncryptionMode === 2) {
-        RFB.messages.ardSetEncryption(this._sock, 1);
-        Log.Info("ARD: Sent SetEncryption request (cmd=1)");
-    }
+    this._ardSendSessionSetup();
 
     // Defer FBUpdateRequest — dimensions are still 0x0, will send when valid
     this._ardDeferredFBURequest = true;
@@ -1057,13 +1128,12 @@ RFB.prototype._ardApplyDisplayInfo2 = function (info, rectW, rectH) {
 
     if (info === null) return;
 
-    // The server is now sending another display, or the same one at
-    // another size: ask for the whole picture once. While the first
-    // request of the session is still deferred, that one covers it.
-    const switched = this._ardShownDisplay !== null &&
-                     this._ardShownDisplay !== info.displayId;
-    this._ardShownDisplay = info.displayId;
-    if ((resized || switched) && !this._ardDeferredFBURequest &&
+    // Ask for the whole picture after every DisplayInfo2, as Apple's viewer
+    // does. The server sends one whenever what it shows changes (another
+    // display, a new size, the screen locking or unlocking) and may push
+    // nothing more until asked. While the first request of the session is
+    // still deferred, that one covers it.
+    if (!this._ardDeferredFBURequest &&
         this._rfbConnectionState === 'connected' &&
         this._fbWidth > 0 && this._fbHeight > 0) {
         RFB.messages.fbUpdateRequest(this._sock, false, 0, 0,
@@ -1095,6 +1165,17 @@ RFB.prototype._ardApplyDisplayInfo2 = function (info, rectW, rectH) {
 };
 
 // CursorAlpha (1104): [u32be cursorId][u32be dataSize][zlib data if dataSize>0]
+// In High Performance the server bakes the cursor into the HEVC picture on a
+// virtual display (a real/shared display does not), so drawing the client's own
+// cursor too would show a double — as Apple's own viewer does. The client cursor
+// is therefore hidden by default while HP media is on screen; the page's
+// "Show local cursor" advanced setting (rfb._ardHpShowLocalCursor) draws it
+// anyway. Only High Performance is affected; a standard session always draws it.
+RFB.prototype._ardHideLocalCursorInHp = function () {
+    if (!this._ardHp) return false;
+    return !this._ardHpShowLocalCursor;
+};
+
 RFB.prototype._ardHandleCursorAlpha = function () {
     if (this._sock.rQwait("CursorAlpha header", 8)) { return false; }
 
@@ -1134,7 +1215,9 @@ RFB.prototype._ardHandleCursorAlpha = function () {
             this._ardCursorCache.set(cursorId, { rgba, hotx, hoty, w, h });
             this._ardCurrentCursorId = cursorId;
 
-            if (this._ardCursorVisible) {
+            if (this._ardHideLocalCursorInHp()) {
+                this._canvas.style.cursor = 'none';
+            } else if (this._ardCursorVisible) {
                 this._updateCursor(rgba, hotx, hoty, w, h);
             }
 
@@ -1146,7 +1229,9 @@ RFB.prototype._ardHandleCursorAlpha = function () {
     } else if (cursorId >= 1000 && dataSize === 0) {
         // Set cached cursor
         const cached = this._ardCursorCache.get(cursorId);
-        if (cached && this._ardCursorVisible) {
+        if (this._ardHideLocalCursorInHp()) {
+            this._canvas.style.cursor = 'none';
+        } else if (cached && this._ardCursorVisible) {
             this._updateCursor(cached.rgba, cached.hotx, cached.hoty,
                               cached.w, cached.h);
         }
@@ -1157,7 +1242,11 @@ RFB.prototype._ardHandleCursorAlpha = function () {
         if (dataSize > 0) {
             this._sock.rQskipBytes(dataSize);
         }
-        this._ardSetPredefinedCursor(cursorId);
+        if (this._ardHideLocalCursorInHp()) {
+            this._canvas.style.cursor = 'none';
+        } else {
+            this._ardSetPredefinedCursor(cursorId);
+        }
         Log.Debug("ARD: CursorAlpha — predefined cursor id=" + cursorId);
     }
 
@@ -1321,9 +1410,16 @@ Object.defineProperty(RFB.prototype, 'ardControlMode', {
 Object.defineProperty(RFB.prototype, 'ardQualityPreset', {
     get() { return this._ardQualityPreset; },
     set(preset) {
-        const valid = ['halftone', 'gray', 'thousands', 'millions', 'adaptive'];
+        const valid = ['halftone', 'gray', 'thousands', 'millions', 'adaptive', 'highperf'];
         if (!valid.includes(preset)) return;
         if (this._ardQualityPreset === preset) return;
+        // High Performance is negotiated when the connection is made;
+        // moving to or from it needs a new connection.
+        if ((preset === 'highperf' || this._ardHp) &&
+            this._rfbConnectionState === 'connected') {
+            Log.Warn("ARD: High Performance can only be chosen before connecting");
+            return;
+        }
         this._ardQualityPreset = preset;
         if (this._rfbConnectionState === 'connected' && this._rfbAppleARD) {
             this._ardQualitySwitch();
@@ -1453,10 +1549,260 @@ RFB.prototype._handleRect = function () {
 
             case pseudoEncodingArdKeyboardInput:  // 1109
                 return this._ardHandleKeyboardInput();
+
+            case pseudoEncodingArdMediaStream:  // 1110
+                return this._ardHandleMediaStreamRect('message1');
+
+            case encodingArdProMode:  // 1010, as a rectangle: the media answer
+                return this._ardHandleMediaStreamRect('answer');
         }
     }
     return _origHandleRect.call(this);
 };
+
+// ===== High Performance mode (ARD protocol spec, Section 14) =====
+//
+// The protocol lives in ard/hp/. Here: when to ask for it, the two
+// rectangles of its negotiation, and what to do when it fails.
+
+// High Performance is asked for when the preset says so, the page has
+// confirmed the browser can decode it and told us where the media channel
+// is, it has not already failed on this connection, and the server is one
+// to ask.
+RFB.prototype._ardHpWanted = function () {
+    return this._ardQualityPreset === 'highperf' &&
+           !!this._ardHpAllowed && !!this._ardHpMediaUrl && !this._ardHpFailed &&
+           this._ardHpOffered();
+};
+
+// Whether this server is one to ask for High Performance, by its
+// ServerInit. Like Apple's viewers, this one does not ask an Intel Mac.
+RFB.prototype._ardHpOffered = function () {
+    return offersHighPerformance(this._ardCapabilityBitmap);
+};
+
+// High Performance normally runs on a virtual display the server creates
+// for the viewer, at the viewer's pixel density. The request has to reach
+// the server before SetEncodings. Without it the server sends its real
+// displays instead.
+//
+// That is before the server has shown that it knows High Performance, so
+// the request goes only to a server whose ServerInit is that of the Macs
+// seen to send the mode (_ardHpOffered). The page does not try again on a
+// connection that ends early.
+//
+// A virtual display login in Standard quality sends the request too when a
+// size has been asked for (ardHpResolution). No viewer is known to send it
+// outside High Performance, so what a Mac makes of it there is an open
+// question: this is the means of finding out.
+RFB.prototype._ardHpRequestVirtualDisplay = function () {
+    const highPerf = this._ardHpWanted() && this._ardHpVirtualDisplay !== false;
+    const sizedStandard = !highPerf && !!this._ardHpDisplay &&
+                          this._ardSessionType === sessionCmdConnectToVirtualDisplay;
+    if (!highPerf && !sizedStandard) return;
+    // _ardHpDisplay: { width, height, scale } to ask for a display of that
+    // size; without it, the display Apple's viewer asks for
+    const display = this._ardHpDisplay ? virtualDisplayFor(this._ardHpDisplay) : null;
+    if (display) {
+        const m = display.modes[0];
+        Log.Info("ARD: asking for a virtual display of " + m.width + "x" + m.height +
+                 " points, " + m.pixelWidth + "x" + m.pixelHeight + " pixels, room for " +
+                 display.largest.pixelWidth + "x" + display.largest.pixelHeight +
+                 (sizedStandard ? " (Standard quality, experimental)" : ""));
+    }
+    RFB.messages.ardVirtualDisplay(this._sock, buildVirtualDisplayMessage(display ? [display] : undefined));
+    this._ardVirtualDisplayAsked = true;
+};
+
+// Ask the server, on the open connection, for a new picture size: send a
+// fresh VirtualDisplay (0x1d) and have the session re-offer, the way Apple's
+// viewer follows its window. Only while High Performance is streaming on a
+// virtual display. The server acts on it whether or not that display's
+// "Dynamic resolution" setting is on (confirmed against macOS 27); the
+// setting only makes Apple's own viewer follow its window.
+RFB.prototype._ardHpResize = function (display) {
+    if (!this._ardHp || this._ardHp.state !== 'streaming') return false;
+    if (!this.ardOnVirtualDisplay() || !display) return false;
+    // One size change at a time: sending 0x1d for a new size while the last
+    // is still being negotiated would move the server's display out from
+    // under the stream the viewer is finishing.
+    if (this._ardHp.reoffering()) return false;
+    const vd = virtualDisplayFor(display);
+    const m = vd.modes[0];
+    const clamped = (m.width !== display.width || m.height !== display.height);
+    Log.Info("ARD: resize — asked " + display.width + "x" + display.height +
+             " pt @" + (display.scale || 2) + " -> sending " + m.width + "x" + m.height +
+             " pt, " + m.pixelWidth + "x" + m.pixelHeight + " px, room " +
+             vd.largest.pixelWidth + "x" + vd.largest.pixelHeight +
+             (clamped ? " (CLAMPED from window)" : "") +
+             " [" + (m.pixelWidth * m.pixelHeight * 60 / 1e6).toFixed(0) + " Mpx/s]");
+    this._ardHpDisplay = display;
+    RFB.messages.ardVirtualDisplay(this._sock, buildVirtualDisplayMessage([vd]));
+    this._ardHp.reoffer();
+    return true;
+};
+
+// Soften the held picture while the new size is on its way, the way Apple's
+// viewer does, and clear it when the new picture arrives.
+RFB.prototype._ardHpResizeVisual = function (active) {
+    // The picture is drawn into an overlay canvas over noVNC's own, so the
+    // filter goes on the element that holds both (noVNC's _screen div).
+    const canvas = this._canvas;
+    const box = (canvas && canvas.parentElement) || canvas;
+    if (!box) return;
+    box.style.transition = 'filter 0.18s ease';
+    box.style.filter = active ? 'blur(8px) brightness(0.72)' : '';
+};
+
+// The session is on a virtual display: one this viewer asked the server to
+// make, or the virtual display login the server offered.
+RFB.prototype.ardOnVirtualDisplay = function () {
+    return this._ardVirtualDisplayAsked ||
+           this._ardSessionType === sessionCmdConnectToVirtualDisplay;
+};
+
+// Full encryption has been asked for and has not started yet. Until it
+// has, nothing that must stay secret may be sent.
+RFB.prototype._ardEncryptionAwaited = function () {
+    return !!this._ardAuthKey && this._ardEncryptionMode === 2 && !this._ardEncryptionEnabled;
+};
+
+RFB.prototype._ardHpStart = function () {
+    if (this._ardHp) return;
+    // The offer carries the keys that protect the picture and the sound.
+    // The server may open the negotiation before the connection is
+    // encrypted, so the offer waits for that. Where encryption covers
+    // keystrokes only, the keys travel as openly as the rest of the session.
+    const holdOffer = this._ardEncryptionAwaited();
+    if (!holdOffer && !this._ardEncryptionEnabled) {
+        Log.Warn("ARD HP: this connection is not encrypted, so the media keys are not either");
+    }
+    this._ardHp = new HpSession({
+        mediaUrl: this._ardHpMediaUrl,
+        holdOffer,
+        feedback: this._ardHpFeedback,
+        endpoint: this._ardHpEndpoint,
+        sendOffer: bytes => RFB.messages.ardMediaStreamNegotiation(this._sock, bytes),
+        createSink: opts => new VideoSink(Object.assign({
+            target: this._canvas,
+            view: () => this._ardHpView(),
+        }, opts)),
+        audioMuted: !!this._ardAudioMuted,
+        // Loaded only when wanted: it brings a WebAssembly decoder with it.
+        createAudio: this._ardHpAudio === false ? null
+            : () => import('./hp/audio.js').then(m => m.AudioPipeline.create()),
+        onState: (state, reason) => this._ardHpOnState(state, reason),
+        onResize: active => this._ardHpResizeVisual(active),
+        log: msg => Log.Info("ARD HP: " + msg),
+        warn: msg => Log.Warn("ARD HP: " + msg),
+    });
+    this._ardHp.start();
+};
+
+// The part of the framebuffer noVNC's canvas shows, which is not all of it
+// when the view is clipped to the window.
+RFB.prototype._ardHpView = function () {
+    const display = this._display;
+    const vp = display._viewportLoc;
+    return { x: vp.x, y: vp.y, w: vp.w, h: vp.h, fbWidth: display.width, fbHeight: display.height };
+};
+
+RFB.prototype._ardHpOnState = function (state, reason) {
+    const session = this._ardHp;
+    Log.Info("ARD HP: state " + state + (reason ? " (" + reason + ")" : ""));
+
+    // Once the server has answered, the picture comes as media, so the
+    // viewer stops asking for pixel framebuffer updates (fbUpdateRequest);
+    // servers have been seen to drop a session that keeps asking for pixels.
+    // The AutoFBUpdate subscription (0x09) is NOT silenced: it is how the
+    // server keeps pushing cursor-shape rects (1104/1100) and DisplayInfo2 on
+    // TCP during media, exactly as Apple's own viewer does. Silencing it too
+    // let the subscription lapse after ~3s and froze the cursor.
+    this._sock._ardHpQuiet = state === 'waiting' || state === 'streaming';
+
+    if (state === 'failed') {
+        // Not again on this connection.
+        this._ardHpFailed = true;
+        this._ardHp = null;
+        // The server never opened the negotiation, so this is an ordinary
+        // session: carry on in it. Any later failure leaves the server in a
+        // state not yet understood; the page reconnects.
+        if (reason === 'no-message1' && this._rfbConnectionState === 'connected') {
+            this._ardQualitySwitch();
+        }
+    }
+
+    this.dispatchEvent(new CustomEvent("ardhpstate", {
+        detail: {
+            state,
+            reason: reason || null,
+            failure: session ? session.failure : null,
+            video: session ? session.video : null,
+            stats: session ? Object.assign({}, session.stats) : null,
+        }
+    }));
+    ardUpdateInfoPanel(this);
+};
+
+// Rectangles 1110 (Message 1) and 1010 (the answer): [u16be length][payload]
+RFB.prototype._ardHandleMediaStreamRect = function (which) {
+    if (this._sock.rQwait("MediaStream header", 2)) { return false; }
+    const head = this._sock.rQpeekBytes(2);
+    const length = (head[0] << 8) | head[1];
+    if (this._sock.rQwait("MediaStream body", 2 + length)) { return false; }
+
+    const payload = new Uint8Array(this._sock.rQshiftBytes(2 + length));
+    Log.Info("ARD HP: " + which + " received (" + length + " bytes)");
+
+    if (this._ardHp) {
+        if (which === 'message1') {
+            this._ardHp.handleMessage1(payload);
+        } else {
+            this._ardHp.handleAnswer(payload);
+        }
+    }
+    return true;
+};
+
+// Pixel framebuffer update requests are dropped while High Performance media
+// is the picture — the picture is HEVC over UDP, and a server has been seen to
+// drop a session that keeps asking for pixels. This is called from many
+// places, noVNC's own update loop among them, so the check sits here. The
+// AutoFBUpdate subscription (0x09) is deliberately NOT gated this way — it must
+// stay alive in HP to keep cursor-shape rects flowing (see ardAutoFBUpdate).
+// On any ARD connection incremental requests are dropped as well: the server
+// pushes updates once AutoFBUpdate is on, and Apple's viewer never sends one.
+const _origFbUpdateRequest = RFB.messages.fbUpdateRequest;
+RFB.messages.fbUpdateRequest = function (sock, incremental, ...args) {
+    if (sock._ardHpQuiet) return;
+    if (sock._ardPushUpdates && incremental) return;
+    return _origFbUpdateRequest.call(RFB.messages, sock, incremental, ...args);
+};
+
+RFB.prototype._updateConnectionState = function (state) {
+    if ((state === 'disconnecting' || state === 'disconnected') && this._ardHp) {
+        const session = this._ardHp;
+        this._ardHp = null;
+        session.close();
+    }
+    return _origUpdateConnectionState.call(this, state);
+};
+
+// Mute the Mac's sound (High Performance). Kept across reconnects by the page.
+Object.defineProperty(RFB.prototype, 'ardAudioMuted', {
+    get() { return !!this._ardAudioMuted; },
+    set(muted) {
+        this._ardAudioMuted = !!muted;
+        if (this._ardHp) this._ardHp.setAudioMuted(this._ardAudioMuted);
+    },
+    configurable: true,
+});
+
+// Whether High Performance media is on screen.
+Object.defineProperty(RFB.prototype, 'ardHighPerformanceActive', {
+    get() { return !!this._ardHp && this._ardHp.state === 'streaming'; },
+    configurable: true,
+});
 
 // ===== (h) SecurityResult — skip SecurityReason for ARD =====
 
@@ -1548,8 +1894,9 @@ RFB.prototype._buildEncryptedKeyPayload = function (keysym, down) {
 
 // Patch sendKey — intercept for EncryptedEvent when applicable
 RFB.prototype.sendKey = function (keysym, code, down) {
+    // Characters above Latin-1 go as Unicode keysyms (see keysyms.js)
     if (this._rfbAppleARD) {
-        keysym = ARD_CYRILLIC_KEYSYMS.get(keysym) ?? keysym;
+        keysym = ardKeysym(keysym);
     }
     if (this._rfbAppleARD && this._ardAuthKey && !this._ardEncryptionEnabled) {
         if (this._rfbConnectionState !== 'connected' || this._viewOnly) { return; }
@@ -1944,6 +2291,7 @@ RFB.prototype._enableStreamEncryption = function (sessionKey, sessionIV) {
     this._ardSessionKey = sessionKey;
     this._ardSessionIV = sessionIV;
     Log.Info("ARD: Stream encryption enabled (AES-128-CBC)");
+    if (this._ardHp) this._ardHp.releaseOffer();
 
     ardUpdateInfoPanel(this);
 
@@ -2221,6 +2569,24 @@ RFB.messages.ardSetMode = function (sock, mode) {
 
 // SetDisplay (0x0d): [type(1)][u8 combineAll][pad(2)][u32be displayId] = 8 bytes
 // displayId null asks for all displays combined.
+// MediaStreamNegotiation (0x1c): SRTP keys and media offers, built by
+// ard/hp/negotiation.js. Sent in answer to rectangle 1110.
+RFB.messages.ardMediaStreamNegotiation = function (sock, bytes) {
+    sock.sQpushBytes(bytes);
+    sock.flush();
+
+    Log.Info("ARD: Sent MediaStreamNegotiation (" + bytes.length + " bytes)");
+};
+
+// VirtualDisplay (0x1d): asks the server to create the display High
+// Performance mode is shown on. Built by ard/hp/virtual-display.js.
+RFB.messages.ardVirtualDisplay = function (sock, bytes) {
+    sock.sQpushBytes(bytes);
+    sock.flush();
+
+    Log.Info("ARD: Sent VirtualDisplay request (" + bytes.length + " bytes)");
+};
+
 RFB.messages.ardSetDisplay = function (sock, displayId = null) {
     sock.sQpushBytes(setDisplayBytes(displayId));
     sock.flush();
@@ -2232,7 +2598,15 @@ RFB.messages.ardSetDisplay = function (sock, displayId = null) {
 // AutoFBUpdate (0x09): [type(1)][pad(1)][u16be enabled][u32be interval]
 //                      [u16be x][u16be y][u16be w][u16be h] = 16 bytes
 // Tells the server to automatically push framebuffer updates
-// without waiting for explicit FBUpdateRequests.
+// without waiting for explicit FBUpdateRequests. This is the subscription
+// that carries cursor-shape rects (1104/1100) and DisplayInfo2 on TCP.
+// Sent with each full update request (connect, quality or display change),
+// as Apple's viewer does, and in reply to every Tickle, which restarts updates
+// the server stopped across a screen lock. enabled=0 stops all updates until
+// re-enabled. It is NOT gated on _ardHpQuiet: in High Performance the server
+// pushes only those small control rects over TCP (the picture is HEVC over
+// UDP), and there it is also renewed per completed FBU, since the cursor
+// froze after ~3s without that.
 RFB.messages.ardAutoFBUpdate = function (sock, enabled, x, y, w, h) {
     sock.sQpush8(msgTypeAutoFBUpdate);  // 0x09
     sock.sQpush8(0);                    // padding
@@ -2444,7 +2818,11 @@ function ardUpdateInfoPanel(rfb) {
     set('ard_info_encryption', rfb._ardEncryptionEnabled
         ? 'AES-128-CBC' : (rfb._ardAuthKey ? 'Keystroke only' : 'None'));
     const qualityLabels = { halftone: 'Halftone', gray: 'Gray16', thousands: 'Thousands', millions: 'Full Color', adaptive: 'Adaptive' };
-    set('ard_info_quality', qualityLabels[rfb._ardQualityPreset] || rfb._ardQualityPreset);
+    let quality = qualityLabels[rfb._ardQualityPreset] || rfb._ardQualityPreset;
+    if (rfb._ardQualityPreset === 'highperf') {
+        quality = rfb._ardHp ? 'High Performance (' + rfb._ardHp.state + ')' : 'Adaptive (High Performance unavailable)';
+    }
+    set('ard_info_quality', quality);
     const modeLabels = { 0: 'Observe', 1: 'Control', 2: 'Exclusive' };
     set('ard_info_mode', modeLabels[rfb._ardControlMode] || 'Control');
     const sessionLabels = { 0: 'Request Console', 1: 'Share Display', 2: 'Virtual Display' };

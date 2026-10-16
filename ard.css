@@ -39,29 +39,68 @@
 }
 
 /* Session Select Dialog — centered overlay, above transition screen (z-index 50) */
-#noVNC_ard_session_dlg {
+.noVNC_session_info {
+    margin: 1em 0;
+    max-width: 290px;
+}
+/* Session choice dialog */
+#noVNC_ard_type_dlg {
     position: fixed;
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
     z-index: 100;
+    max-width: 360px;
 }
-#noVNC_ard_session_dlg.noVNC_open {
+#noVNC_ard_type_dlg.noVNC_open {
     visibility: visible;
     opacity: 1;
     transform: translate(-50%, -50%);
 }
-.noVNC_session_info {
-    margin: 1em 0;
-    max-width: 290px;
+.noVNC_ard_type_row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin: 12px 0;
+    text-align: left;
+    cursor: pointer;
 }
-#noVNC_ard_session_dlg .button_row {
+.noVNC_ard_type_row input {
+    margin-top: 3px;
+    flex: none;
+}
+/* Let the text column shrink inside the flex row so long notes wrap. */
+.noVNC_ard_type_row > span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.noVNC_ard_type_row small {
+    display: block;
+    color: #666;
+    font-size: 0.85em;
+    margin-top: 2px;
+}
+#noVNC_ard_type_quality {
+    margin-left: 26px;
+    padding-left: 12px;
+    border-left: 2px solid rgba(0, 0, 0, 0.12);
+}
+.noVNC_ard_type_off {
+    opacity: 0.45;
+}
+.noVNC_ard_type_off .noVNC_ard_type_row,
+label.noVNC_ard_type_off {
+    cursor: default;
+}
+#noVNC_ard_type_dlg .button_row {
     justify-content: flex-end;
     gap: 14px;
 }
-#noVNC_ard_session_dlg .button_row button {
-    white-space: nowrap;
-}
+
+/* Sound button (High Performance) */
+#noVNC_audio_button .noVNC_audio_off { display: none; }
+#noVNC_audio_button.noVNC_muted .noVNC_audio_on { display: none; }
+#noVNC_audio_button.noVNC_muted .noVNC_audio_off { display: inline; }
 
 /* Remote User Avatar */
 #noVNC_ard_user_avatar {

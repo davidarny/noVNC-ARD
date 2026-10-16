@@ -43,6 +43,10 @@
         import KeyTable from './noVNC/core/input/keysym.js';
         import { encodingArdHalftone, encodingArdGray16, encodingArdThousands } from './ard/ard-constants.js';
         import { displayMenuEntries } from './ard/display-info.js';
+        import { VideoSink } from './ard/hp/video-sink.js';
+        import { MEDIA_SUBPROTOCOL } from './ard/hp/session.js';
+        import { parseDisplayRequest } from './ard/hp/virtual-display.js';
+        import { reconnectDelay } from './ard/reconnect-delay.js';
 
         let response;
 
@@ -175,10 +179,568 @@
         const ardVirtualLogin = (virtualLoginParam === 0 || virtualLoginParam === 2)
             ? virtualLoginParam : 1;
 
-        // ardQuality: halftone, gray, thousands, millions, adaptive (default)
+        // ardQuality: halftone, gray, thousands, millions, adaptive (default),
+        // highperf (High Performance: HEVC over a media channel on the relay)
         const ardQualityParam = getParamCI('ardQuality');
-        const ardInitialQuality = ['halftone', 'gray', 'thousands', 'millions', 'adaptive'].includes(ardQualityParam)
+        const ardInitialQuality = ['halftone', 'gray', 'thousands', 'millions', 'adaptive', 'highperf'].includes(ardQualityParam)
             ? ardQualityParam : 'adaptive';
+
+        // High Performance needs a browser that decodes the server's HEVC
+        // and a relay with a media endpoint. When it fails, the next
+        // connection is an ordinary 'adaptive' one.
+        const ardMediaPath = (getParamCI('ardMediaPath') || 'media').replace(/^\/+/, '');
+        // ardHpFeedback: which RTCP the viewer sends, for testing what the
+        // server needs. Comma list of rr, ack, rctl; default all.
+        const ardHpFeedbackParam = getParamCI('ardHpFeedback');
+        const ardHpFeedback = ardHpFeedbackParam === null || ardHpFeedbackParam === undefined ? undefined : {
+            reports: ardHpFeedbackParam.split(',').includes('rr'),
+            acks: ardHpFeedbackParam.split(',').includes('ack'),
+            rateControl: ardHpFeedbackParam.split(',').includes('rctl'),
+        };
+        // ardHpVirtualDisplay: false shows the Mac's real displays instead of
+        // a virtual display created for the viewer
+        const ardHpVirtualDisplay = getParamCI('ardHpVirtualDisplay') !== 'false';
+        // ardResolution (also ardHpResolution): the size of the virtual
+        // display to ask for, in a virtual display login of either quality.
+        // In points: 1920x1080 (at 2 pixels to the point), 2560x1440@1
+        // (with the scale), window (this window's size, at 1) or window@2.
+        // Default: nothing asked in Standard; in High Performance the
+        // display Apple's viewer asks for, 1920x1080 at 2.
+        const ardHpResolution = getParamCI('ardResolution') || getParamCI('ardHpResolution');
+        function ardHpDisplay() {
+            if (!ardHpResolution) return null;
+            const box = document.getElementById('noVNC_container');
+            const display = parseDisplayRequest(ardHpResolution, {
+                width: box ? box.clientWidth : window.innerWidth,
+                height: box ? box.clientHeight : window.innerHeight,
+            });
+            if (!display) {
+                Log.Warn('ARD: ardResolution not understood: ' + ardHpResolution);
+                return null;
+            }
+            return display;
+        }
+
+        // ardResolution of the form "window" or "window@2" follows the
+        // browser window: while High Performance is streaming, a resize of
+        // the window asks the Mac for a display of the new size, on the open
+        // connection, without reconnecting.
+        // Resize to window: in High Performance the Mac's display follows the
+        // browser window, sharp at any size. On by default unless the URL
+        // asked for a fixed size; the session dialog turns it on or off.
+        const ardWindowFormUrl = /^window(@[12])?$/i.test(ardHpResolution || '');
+        // Match parseDisplayRequest for an explicit form: window@2 is 2,
+        // window@1 and bare "window" are 1. With no size asked at all, the
+        // dialog's Resize to window defaults to HiDPI (2).
+        const ardWindowScale =
+            /@2$/i.test(ardHpResolution || '') ? 2 :
+            /@1$/i.test(ardHpResolution || '') ? 1 :
+            ardWindowFormUrl ? 1 : 2;
+        let ardResizeToWindow = ardWindowFormUrl || !ardHpResolution;
+
+        function ardWindowDisplay() {
+            const box = document.getElementById('noVNC_container');
+            return parseDisplayRequest('window@' + ardWindowScale, {
+                width: box ? box.clientWidth : window.innerWidth,
+                height: box ? box.clientHeight : window.innerHeight,
+            });
+        }
+        // A web page cannot see the mouse button of an OS window resize: the
+        // drag is on the window frame, not the document, so there is no
+        // release event to wait for. We commit once the size has been still
+        // this long, and sooner if a pointer release does reach the page.
+        const ARD_FOLLOW_DEBOUNCE_MS = 250;   // after the size stops changing
+        const ARD_FOLLOW_MIN_CHANGE = 24;     // points; ignore smaller jitters
+        let ardFollowTimer = null;
+        let ardFollowLast = null;             // { width, height } last asked for
+        let ardFollowBlurred = false;         // the drag softened the picture
+
+        function ardFollowClearBlur() {
+            if (ardFollowBlurred && UI.rfb && UI.rfb._ardHpResizeVisual) {
+                UI.rfb._ardHpResizeVisual(false);
+            }
+            ardFollowBlurred = false;
+        }
+
+        function ardFollowStop() {
+            if (ardFollowTimer) { clearTimeout(ardFollowTimer); ardFollowTimer = null; }
+            ardFollowClearBlur();
+            ardFollowLast = null;
+        }
+
+        // The drag has stopped: ask for the new size, or, if it did not
+        // really change, just take the softening back off.
+        function ardFollowResize() {
+            const rfb = UI.rfb;
+            if (!ardResizeToWindow || !rfb || !rfb.ardHighPerformanceActive) { ardFollowClearBlur(); return; }
+            const display = ardWindowDisplay();
+            if (!display) { ardFollowClearBlur(); return; }
+            if (ardFollowLast &&
+                Math.abs(display.width - ardFollowLast.width) < ARD_FOLLOW_MIN_CHANGE &&
+                Math.abs(display.height - ardFollowLast.height) < ARD_FOLLOW_MIN_CHANGE) {
+                ardFollowClearBlur();
+                return;
+            }
+            if (rfb._ardHpResize(display)) {
+                ardFollowLast = { width: display.width, height: display.height };
+                // The session now owns the softening and clears it when the
+                // new picture arrives.
+                ardFollowBlurred = false;
+            } else {
+                // A re-offer is still in flight: keep the blur and try the
+                // new size again once it settles.
+                if (ardFollowTimer) clearTimeout(ardFollowTimer);
+                ardFollowTimer = setTimeout(() => { ardFollowTimer = null; ardFollowResize(); },
+                                            ARD_FOLLOW_DEBOUNCE_MS);
+            }
+        }
+
+        function ardFollowSchedule() {
+            if (!ardResizeToWindow) return;
+            const rfb = UI.rfb;
+            // Soften the picture as the drag begins; the resize itself waits
+            // until the drag stops (the debounce below).
+            if (rfb && rfb.ardHighPerformanceActive && !ardFollowBlurred && rfb._ardHpResizeVisual) {
+                rfb._ardHpResizeVisual(true);
+                ardFollowBlurred = true;
+            }
+            if (ardFollowTimer) clearTimeout(ardFollowTimer);
+            ardFollowTimer = setTimeout(() => { ardFollowTimer = null; ardFollowResize(); },
+                                        ARD_FOLLOW_DEBOUNCE_MS);
+        }
+
+        if (typeof ResizeObserver !== 'undefined') {
+            const box = document.getElementById('noVNC_container');
+            if (box) new ResizeObserver(() => ardFollowSchedule()).observe(box);
+            window.addEventListener('resize', ardFollowSchedule);
+            // If the release lands in the page, commit the new size at once
+            // instead of waiting out the settle.
+            const commitNow = () => {
+                if (ardFollowBlurred && ardFollowTimer) {
+                    clearTimeout(ardFollowTimer);
+                    ardFollowTimer = null;
+                    ardFollowResize();
+                }
+            };
+            window.addEventListener('pointerup', commitNow, true);
+            window.addEventListener('mouseup', commitNow, true);
+        }
+
+        // ardHpAudio: false leaves the Mac's sound unplayed
+        const ardHpAudio = getParamCI('ardHpAudio') !== 'false';
+        // ardHpShowLocalCursor: High Performance bakes the cursor into the video
+        // on a virtual display. Apple's own viewer also draws the smooth local
+        // cursor on top, so by DEFAULT we show both (the baked video cursor plus
+        // the responsive client cursor). The advanced "Show local cursor"
+        // checkbox — or ?ardHpShowLocalCursor=1/0 — overrides; only an explicit
+        // '0' hides the local cursor. Persisted in localStorage.
+        const ardHpShowLocalCursorParam = getParamCI('ardHpShowLocalCursor');
+        function ardHpShowLocalCursor() {
+            if (ardHpShowLocalCursorParam === '1') return true;
+            if (ardHpShowLocalCursorParam === '0') return false;
+            const el = document.getElementById('noVNC_setting_ardHpShowLocalCursor');
+            if (el) return !!el.checked;
+            // No checkbox yet (early call): default ON unless explicitly stored '0'.
+            try { return localStorage.getItem('ardHpShowLocalCursor') !== '0'; } catch (e) { return true; }
+        }
+        let ardHpSupported = false;
+        let ardHpDisabled = false;
+        // The connection in progress asked for High Performance:
+        // { streamingSince }, null once it has failed or was not asked for
+        let ardHpAttempt = null;
+        const ardHpEarlyMs = 60000;
+        VideoSink.isSupported().then((ok) => {
+            ardHpSupported = ok;
+            if (!ok) Log.Info('ARD: this browser cannot decode High Performance video');
+            // A connection made before the answer was known (autoconnect)
+            if (UI.rfb && UI.rfb._rfbConnectionState === 'connecting') ardApplySessionChoice();
+        });
+
+        function ardHpMediaUrl() {
+            if (UI.getSetting('path') === 'msgport') return null;   // no media channel there yet
+            const host = UI.getSetting('host') || window.location.hostname;
+            const port = UI.getSetting('port') || window.location.port;
+            const scheme = UI.getSetting('encrypt') ? 'wss' : 'ws';
+            return scheme + '://' + host + (port ? ':' + port : '') + '/' + ardMediaPath;
+        }
+
+        // ---------------------------------------------------------------
+        //  Session choice: Share Display, or Virtual Display in High
+        //  Performance or Standard quality
+        // ---------------------------------------------------------------
+        // ardSessionType=share|virtual|highperf forces the choice and skips
+        // the dialog, as does ardQuality=highperf. Otherwise the dialog is
+        // shown when the user clicks Connect or the page first autoconnects,
+        // with the last choice selected.
+        const ardSessionTypeParam = (getParamCI('ardSessionType') || '').toLowerCase();
+        const ardForcedChoice =
+            ardSessionTypeParam === 'share' ? { display: 'share', quality: 'standard' } :
+            ardSessionTypeParam === 'virtual' ? { display: 'virtual', quality: 'standard' } :
+            (ardSessionTypeParam === 'highperf' || ardQualityParam === 'highperf')
+                ? { display: 'virtual', quality: 'highperf' } : null;
+        let ardSessionChoice = ardForcedChoice;     // null: nothing chosen, behave as before
+        let ardAskOnThisConnect = false;            // show the dialog once signed in
+        let ardPendingQuestion = null;              // what the open dialog is answering
+        let ardMediaOk = null;                      // does the relay have a media channel: null = not known
+        let ardMediaBusy = false;                   // is another viewer using it
+        let ardAudioMuted = false;
+        let ardHpInfoTimer = null;
+
+        function ardStoredChoice() {
+            try {
+                const c = JSON.parse(localStorage.getItem('ard_session_choice'));
+                if (c && ['share', 'virtual'].includes(c.display) &&
+                    ['highperf', 'standard'].includes(c.quality)) return c;
+            } catch (e) { /* no storage, or nothing stored */ }
+            return { display: 'share', quality: 'highperf' };
+        }
+
+        // Why High Performance cannot be offered, or null if it can.
+        function ardHpUnusableReason() {
+            if (!ardHpSupported) return 'this browser cannot decode its video';
+            if (ardHpMediaUrl() === null || ardMediaOk === false) {
+                return 'this connection has no media channel';
+            }
+            if (ardMediaBusy) return 'another viewer is using it on this relay';
+            // Known once signed in: the Mac's ServerInit says whether to ask
+            if (UI.rfb && UI.rfb._ardServerInitSeen && !UI.rfb._ardHpOffered()) {
+                return 'this Mac does not offer it';
+            }
+            if (ardHpDisabled) return 'it failed on the last attempt (connect again to retry)';
+            return null;
+        }
+
+        function ardNotice(text, type = 'normal', time = 6000) {
+            UI.showStatus(text, type, time);
+        }
+
+        const ardHpFailureText = {
+            'media-connect': 'the relay has no media channel',
+            'media-closed': 'the media channel closed',
+            'no-message1': 'the Mac did not offer it',
+            'no-encryption': 'the connection was not encrypted in time',
+            'no-answer': 'the Mac did not answer',
+            'no-picture': 'no picture arrived',
+            'decoder': 'the video could not be decoded',
+            'overloaded': 'this computer cannot keep up with it',
+            'media-stopped': 'the Mac stopped sending it',
+            'unsupported-video': 'the Mac sent video this viewer does not read',
+            'stalled': 'part of the picture was lost',
+            'bad-message1': 'the Mac sent something unexpected',
+            'bad-answer': 'the Mac sent something unexpected',
+        };
+
+        // Put the current choice into effect on the connection being made.
+        function ardApplySessionChoice() {
+            const rfb = UI.rfb;
+            if (!rfb) return;
+            const choice = ardSessionChoice;
+            const wantHp = !!choice && choice.display === 'virtual' && choice.quality === 'highperf';
+            const hp = wantHp && ardHpUnusableReason() === null;
+            // The same choice answers the Mac's own question about which
+            // session to open, unless the URL decides that. Not while the
+            // dialog is still to come: an earlier choice must not answer
+            // for the one about to be made.
+            rfb._ardVirtualLogin = (choice && !ardAskOnThisConnect && isNaN(virtualLoginParam))
+                ? (choice.display === 'virtual' ? 2 : 0) : ardVirtualLogin;
+            rfb._ardQualityPreset = hp ? 'highperf'
+                : (ardInitialQuality === 'highperf' ? 'adaptive' : ardInitialQuality);
+            rfb._ardHpAllowed = hp;
+            if (!hp) ardHpAttempt = null;
+            else if (!ardHpAttempt) ardHpAttempt = { streamingSince: null };
+            rfb._ardHpMediaUrl = hp ? ardHpMediaUrl() : null;
+            rfb._ardHpFeedback = ardHpFeedback;
+            rfb._ardHpVirtualDisplay = ardHpVirtualDisplay;
+            // In High Performance with resize-to-window, the display is the
+            // browser window (and follows it); otherwise the URL size, if any.
+            rfb._ardHpDisplay = (hp && ardResizeToWindow) ? ardWindowDisplay() : ardHpDisplay();
+            rfb._ardHpAudio = ardHpAudio;
+            rfb._ardHpShowLocalCursor = ardHpShowLocalCursor();
+            rfb.ardAudioMuted = ardAudioMuted;
+            // Virtual Display in Standard quality is the ordinary virtual
+            // login: nothing more is asked of the Mac.
+            return { wantHp, hp };
+        }
+
+        function ardOnHpState(e) {
+            const d = e.detail;
+            if (d.state === 'streaming') {
+                const v = d.video;
+                ardNotice('High Performance' + (v ? ' · ' + v.width + '×' + v.height : ''), 'normal', 3000);
+                // The size now on screen is the baseline the follower measures from.
+                if (ardResizeToWindow) {
+                    const display = ardWindowDisplay();
+                    ardFollowLast = display ? { width: display.width, height: display.height } : null;
+                }
+                if (ardHpAttempt) ardHpAttempt.streamingSince = performance.now();
+                ardShowAudioButton(ardHpAudio);
+                ardStartHpInfo();
+            } else if (d.state === 'failed') {
+                const why = ardHpFailureText[d.reason] || d.reason;
+                Log.Warn('ARD: High Performance failed (' + d.failure + ')');
+                ardNotice('High Performance stopped: ' + why + '. Using Standard.', 'warn', 8000);
+                ardHpDisabled = true;
+                ardHpAttempt = null;
+                ardHpUiReset();
+                // The Mac never started the negotiation: the session is an
+                // ordinary one and carries on. Otherwise start again without.
+                if (d.reason !== 'no-message1' && UI.rfb) {
+                    UI.rfb.disconnect();
+                }
+            } else if (d.state === 'closed') {
+                ardHpUiReset();
+                ardFollowStop();
+            }
+        }
+
+        function ardShowAudioButton(show) {
+            const btn = document.getElementById('noVNC_audio_button');
+            btn.classList.toggle('noVNC_hidden', !show);
+            btn.classList.toggle('noVNC_muted', ardAudioMuted);
+            btn.title = ardAudioMuted ? "Unmute the Mac's sound" : "Mute the Mac's sound";
+        }
+
+        function ardHpUiReset() {
+            ardShowAudioButton(false);
+            if (ardHpInfoTimer) {
+                clearInterval(ardHpInfoTimer);
+                ardHpInfoTimer = null;
+            }
+            for (const id of ['ard_info_video_row', 'ard_info_audio_row']) {
+                document.getElementById(id).classList.add('noVNC_hidden');
+            }
+        }
+
+        // Once a second while High Performance runs: what is arriving.
+        function ardStartHpInfo() {
+            let last = null;
+            const update = () => {
+                const s = UI.rfb && UI.rfb._ardHp;
+                if (!s || !s.video) return;
+                const now = performance.now();
+                let rate = '';
+                let akbit = '';
+                if (last) {
+                    const dt = (now - last.at) / 1000;
+                    const mbit = Math.max(0, (s.stats.videoBytes - last.bytes)) * 8 / 1e6 / dt;
+                    const pics = Math.max(0, (s.stats.pictures - last.pictures)) / dt;
+                    rate = ' · ' + mbit.toFixed(1) + ' Mbit/s · ' + Math.round(pics) + ' pictures/s';
+                    const akb = Math.max(0, (s.stats.audioBytes - last.audioBytes)) * 8 / 1e3 / dt;
+                    akbit = ' · ' + Math.round(akb) + ' kbit/s';
+                }
+                last = { at: now, bytes: s.stats.videoBytes, pictures: s.stats.pictures,
+                         audioBytes: s.stats.audioBytes };
+                document.getElementById('ard_info_video').textContent =
+                    'HEVC ' + s.video.width + '×' + s.video.height + rate;
+                document.getElementById('ard_info_audio').textContent =
+                    !ardHpAudio ? 'Off' : !s.audioReady ? 'Not available' :
+                    (ardAudioMuted ? 'Muted' : 'On') + akbit;
+            };
+            for (const id of ['ard_info_video_row', 'ard_info_audio_row']) {
+                document.getElementById(id).classList.remove('noVNC_hidden');
+            }
+            if (ardHpInfoTimer) clearInterval(ardHpInfoTimer);
+            ardHpInfoTimer = setInterval(update, 1000);
+            update();
+        }
+
+        // ----- the dialog, shown once signed in -----
+
+        // Is there a relay with a media endpoint behind this connection,
+        // and is it free? A plain TCP proxy accepts the WebSocket but not
+        // the subprotocol. The relay has one media channel, which goes to
+        // whoever connects to it last, so this only asks (?probe): the
+        // relay answers in its close reason and attaches nothing.
+        function ardProbeMedia() {
+            const url = ardHpMediaUrl();
+            ardMediaOk = null;
+            ardMediaBusy = false;
+            if (url === null) {
+                ardMediaOk = false;
+                return Promise.resolve(false);
+            }
+            return new Promise((resolve) => {
+                let ws, opened = false, done = false;
+                const finish = (ok, busy = false) => {
+                    if (done) return;
+                    done = true;
+                    ardMediaOk = ok;
+                    ardMediaBusy = ok && busy;
+                    try { ws.close(); } catch (e) { /* never opened */ }
+                    resolve(ok);
+                };
+                try {
+                    ws = new WebSocket(url + '?probe', MEDIA_SUBPROTOCOL);
+                } catch (e) {
+                    finish(false);
+                    return;
+                }
+                ws.onopen = () => {
+                    if (ws.protocol !== MEDIA_SUBPROTOCOL) {
+                        finish(false);
+                        return;
+                    }
+                    opened = true;
+                    // A relay that does not know the question keeps the
+                    // socket open: it has the endpoint, more is not known.
+                    setTimeout(() => finish(true), 1000);
+                };
+                ws.onerror = () => finish(false);
+                ws.onclose = e => finish(opened, e.reason === 'busy');
+                setTimeout(() => finish(false), 3000);
+            });
+        }
+
+        function ardSyncTypeDialog() {
+            const dlg = document.getElementById('noVNC_ard_type_dlg');
+            const virtual = dlg.querySelector('input[name="ard_display"][value="virtual"]').checked;
+            const hpInput = dlg.querySelector('input[name="ard_quality"][value="highperf"]');
+            const stdInput = dlg.querySelector('input[name="ard_quality"][value="standard"]');
+            const checking = ardHpSupported && ardMediaOk === null;
+            const reason = checking ? 'checking the connection' : ardHpUnusableReason();
+            document.getElementById('noVNC_ard_type_quality').classList.toggle('noVNC_ard_type_off', !virtual);
+            stdInput.disabled = !virtual;
+            hpInput.disabled = !virtual || reason !== null;
+            // What was wanted comes back if the check turns out well.
+            if (reason === null && dlg.dataset.wantHp === 'true') hpInput.checked = true;
+            else if (reason !== null && hpInput.checked) stdInput.checked = true;
+            hpInput.closest('label').classList.toggle('noVNC_ard_type_off', reason !== null);
+            document.getElementById('noVNC_ard_type_hp_note').textContent = reason === null
+                ? 'Sharpest, with sound. Needs a fast network'
+                : checking ? 'Checking the connection…' : 'Not available: ' + reason;
+            // Resize to window applies to High Performance only.
+            const hpChosen = virtual && hpInput.checked && reason === null;
+            const resizeRow = document.getElementById('noVNC_ard_type_resize_row');
+            const resizeInput = document.getElementById('noVNC_ard_type_resize');
+            resizeRow.classList.toggle('noVNC_ard_type_off', !hpChosen);
+            resizeInput.disabled = !hpChosen;
+            resizeInput.checked = ardResizeToWindow;
+        }
+
+        // The connection is waiting for an answer. ctx.mode says to what:
+        // 'select' — the Mac asks, because someone else is using its display
+        // 'choice' — our own pause after sign-in
+        function ardOnSessionQuestion(ctx) {
+            // Nothing to ask on a reconnect or when the URL has decided,
+            // unless someone is using the Mac's display and nobody has
+            // said yet what to do about that.
+            if (!ardAskOnThisConnect &&
+                (ctx.mode === 'choice' || ardSessionChoice || !ctx.username)) {
+                ardAnswerSession(ctx);
+                return;
+            }
+            ardOpenTypeDialog(ctx);
+        }
+
+        function ardAnswerSession(ctx) {
+            if (!UI.rfb) return;
+            const applied = ardApplySessionChoice();
+            if (applied.wantHp && !applied.hp) {
+                ardNotice('High Performance is not available: ' +
+                          ardHpUnusableReason() + '. Using Standard.', 'warn');
+            }
+            if (ctx.mode === 'select') {
+                const virtual = ardSessionChoice && ardSessionChoice.display === 'virtual';
+                UI.rfb.selectSessionType(virtual ? 2 : 1);
+            } else {
+                UI.rfb.ardContinueSession();
+            }
+        }
+
+        function ardOpenTypeDialog(ctx) {
+            const dlg = document.getElementById('noVNC_ard_type_dlg');
+            const c = ardSessionChoice || ardStoredChoice();
+            ardPendingQuestion = ctx;
+
+            const infoEl = dlg.querySelector('.noVNC_session_info');
+            document.getElementById('noVNC_ard_session_hostname').textContent = ' ' + (UI.desktopName || '');
+            if (ctx.mode === 'select' && ctx.username) {
+                document.getElementById('noVNC_ard_session_username').textContent = ctx.username + ' ';
+                infoEl.style.display = '';
+            } else {
+                infoEl.style.display = 'none';
+            }
+            const authEl = dlg.querySelector('.noVNC_session_auth');
+            if (ardReconnectCredentials && ardReconnectCredentials.username) {
+                document.getElementById('noVNC_ard_session_authuser').textContent =
+                    ' ' + ardReconnectCredentials.username;
+                authEl.style.display = '';
+            } else {
+                authEl.style.display = 'none';
+            }
+
+            dlg.querySelector('input[name="ard_display"][value="' + c.display + '"]').checked = true;
+            dlg.querySelector('input[name="ard_quality"][value="' + c.quality + '"]').checked = true;
+            dlg.dataset.wantHp = String(c.quality === 'highperf');
+            ardHpDisabled = false;      // asking again gives it another chance
+            ardProbeMedia().then(() => {
+                if (ardPendingQuestion === ctx) ardSyncTypeDialog();
+            });
+            ardSyncTypeDialog();
+            dlg.classList.add('noVNC_open');
+            document.getElementById('noVNC_ard_type_continue').focus();
+        }
+
+        function ardCloseTypeDialog() {
+            document.getElementById('noVNC_ard_type_dlg').classList.remove('noVNC_open');
+            ardPendingQuestion = null;
+        }
+
+        document.getElementById('noVNC_ard_type_dlg').addEventListener('change', (e) => {
+            const dlg = document.getElementById('noVNC_ard_type_dlg');
+            if (e.target.name === 'ard_quality') dlg.dataset.wantHp = String(e.target.value === 'highperf');
+            if (e.target.id === 'noVNC_ard_type_resize') ardResizeToWindow = e.target.checked;
+            ardSyncTypeDialog();
+        });
+        // While the dialog is open, Enter means Continue and Escape means
+        // Disconnect, wherever the focus is (it need not be in the dialog).
+        document.addEventListener('keydown', (e) => {
+            const dlg = document.getElementById('noVNC_ard_type_dlg');
+            if (!dlg.classList.contains('noVNC_open')) return;
+            if (e.key === 'Enter') {
+                // Let a focused button activate itself (e.g. Disconnect); only
+                // default to Continue when focus is not on a button.
+                const a = document.activeElement;
+                if (a && a.tagName === 'BUTTON') return;
+                e.preventDefault();
+                document.getElementById('noVNC_ard_type_continue').click();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                document.getElementById('noVNC_ard_type_cancel').click();
+            }
+        });
+        for (const id of ['noVNC_ard_type_cancel', 'noVNC_ard_type_disconnect']) {
+            document.getElementById(id).addEventListener('click', (e) => {
+                e.preventDefault();
+                ardCloseTypeDialog();
+                UI.disconnect();
+            });
+        }
+        document.getElementById('noVNC_ard_type_continue').addEventListener('click', () => {
+            const dlg = document.getElementById('noVNC_ard_type_dlg');
+            const ctx = ardPendingQuestion;
+            ardSessionChoice = {
+                display: dlg.querySelector('input[name="ard_display"]:checked').value,
+                quality: dlg.querySelector('input[name="ard_quality"]:checked').value,
+            };
+            ardResizeToWindow = document.getElementById('noVNC_ard_type_resize').checked;
+            try {
+                localStorage.setItem('ard_session_choice', JSON.stringify({
+                    display: ardSessionChoice.display,
+                    // Remember High Performance as the wish even when this
+                    // connection could not offer it.
+                    quality: dlg.dataset.wantHp === 'true' ? 'highperf' : ardSessionChoice.quality,
+                }));
+            } catch (e) { /* not remembered, then */ }
+            ardCloseTypeDialog();
+            ardAskOnThisConnect = false;    // reconnects of this session do not ask
+            if (ctx) ardAnswerSession(ctx);
+        });
+        document.getElementById('noVNC_audio_button').addEventListener('click', () => {
+            ardAudioMuted = !ardAudioMuted;
+            if (UI.rfb) UI.rfb.ardAudioMuted = ardAudioMuted;
+            ardShowAudioButton(true);
+        });
 
         // ardControlMode: 0=observe, 1=shared control (default), 2=exclusive
         const ardControlModeParam = parseInt(getParamCI('ardControlMode'), 10);
@@ -203,24 +765,6 @@
         //  ARD Session Select UI
         // =============================================================
 
-        document.getElementById('noVNC_ard_session_share_button')
-            .addEventListener('click', (e) => {
-                e.preventDefault();
-                document.getElementById('noVNC_ard_session_dlg').classList.remove('noVNC_open');
-                UI.rfb.selectSessionType(1); // ConnectToConsole
-            });
-        document.getElementById('noVNC_ard_session_virtual_button')
-            .addEventListener('click', (e) => {
-                e.preventDefault();
-                document.getElementById('noVNC_ard_session_dlg').classList.remove('noVNC_open');
-                UI.rfb.selectSessionType(2); // ConnectToVirtualDisplay
-            });
-        document.getElementById('noVNC_ard_session_disconnect')
-            .addEventListener('click', (e) => {
-                e.preventDefault();
-                document.getElementById('noVNC_ard_session_dlg').classList.remove('noVNC_open');
-                UI.disconnect();
-            });
 
         // =============================================================
         //  ARD Clipboard Buttons
@@ -486,6 +1030,28 @@
                 }
             });
 
+        // Show local cursor (High Performance): shown by default (both the
+        // baked video cursor and the local one, like Apple). Persist the choice
+        // and apply it to a live session on toggle.
+        (function () {
+            const el = document.getElementById('noVNC_setting_ardHpShowLocalCursor');
+            if (!el) return;
+            try {
+                if (ardHpShowLocalCursorParam === '1' || ardHpShowLocalCursorParam === '0') {
+                    el.checked = ardHpShowLocalCursorParam === '1';
+                } else {
+                    // Default ON — only an explicit stored '0' turns it off.
+                    el.checked = localStorage.getItem('ardHpShowLocalCursor') !== '0';
+                }
+            } catch (e) { el.checked = true; /* storage blocked — default ON */ }
+            el.addEventListener('change', () => {
+                try {
+                    localStorage.setItem('ardHpShowLocalCursor', el.checked ? '1' : '0');
+                } catch (e) { /* ignore */ }
+                if (UI.rfb) UI.rfb._ardHpShowLocalCursor = el.checked;
+            });
+        })();
+
         // Display selector — button toggles panel, entries switch display
         function ardCloseDisplayPanel() {
             document.getElementById('noVNC_display_panel').classList.remove('noVNC_open');
@@ -721,39 +1287,44 @@
         // =============================================================
 
         const _origUIConnect = UI.connect;
+        let ardConnectedBefore = false;             // has this page connected yet
         UI.connect = function (evt, password) {
+            // The user clicked Connect, or the page is autoconnecting for
+            // the first time: once signed in, ask what kind of session to
+            // open, unless the URL has decided. Reconnects come without an
+            // event and reuse the choice made.
+            const firstConnect = !ardConnectedBefore;
+            ardConnectedBefore = true;
+            if (evt instanceof Event || firstConnect) {
+                ardAskOnThisConnect = !ardForcedChoice;
+                // Connecting by hand gives High Performance another chance.
+                // With the session decided by the URL no dialog would.
+                ardHpDisabled = false;
+            }
+            ardHpAttempt = null;
+
             _origUIConnect.call(UI, evt, password);
             ardInhibitReconnect = false;
             if (UI.rfb) {
-                // Apply virtualLogin setting, initial quality, and initial control mode
-                UI.rfb._ardVirtualLogin = ardVirtualLogin;
-                UI.rfb._ardQualityPreset = ardInitialQuality;
+                // Apply the session choice, initial quality and control mode
                 UI.rfb._ardControlMode = ardInitialControlMode;
+                // What is already known (a reconnect, or the URL) is in
+                // place from the start; the question after sign-in can
+                // still change it.
+                ardApplySessionChoice();
+                UI.rfb._ardAskSessionChoice = true;
+                UI.rfb.addEventListener('ardhpstate', ardOnHpState);
                 // Without the selector there would be no way back to
                 // the other displays, so stay on all of them
                 UI.rfb._ardAutoSelectDisplay = ardAutoSelectDisplay && showArdDisplaySelect;
 
-                // Session select event listener
+                // The Mac asks which session, or the connection has
+                // paused after sign-in for the choice: one dialog for both
                 UI.rfb.addEventListener('ardsessionselect', (e) => {
-                    const infoEl = document.querySelector('.noVNC_session_info');
-                    document.getElementById('noVNC_ard_session_hostname').textContent =
-                        ' ' + (UI.desktopName || '');
-                    if (e.detail.hasConsoleUser) {
-                        document.getElementById('noVNC_ard_session_username').textContent =
-                            e.detail.username + ' ';
-                        infoEl.style.display = '';
-                    } else {
-                        infoEl.style.display = 'none';
-                    }
-                    const authEl = document.querySelector('.noVNC_session_auth');
-                    if (ardReconnectCredentials && ardReconnectCredentials.username) {
-                        document.getElementById('noVNC_ard_session_authuser').textContent =
-                            ' ' + ardReconnectCredentials.username;
-                        authEl.style.display = '';
-                    } else {
-                        authEl.style.display = 'none';
-                    }
-                    document.getElementById('noVNC_ard_session_dlg').classList.add('noVNC_open');
+                    ardOnSessionQuestion({ mode: 'select', username: e.detail.username });
+                });
+                UI.rfb.addEventListener('ardsessionchoice', (e) => {
+                    ardOnSessionQuestion({ mode: 'choice', username: e.detail.username });
                 });
 
                 // Remote user avatar
@@ -896,6 +1467,9 @@
             ardInhibitReconnect = true;
             ardReconnectCredentials = null;
             ardReconnectAttempt = 0;
+            // Leaving the session clears any High Performance block it left:
+            // the next connection is a fresh start and tries it again.
+            ardHpDisabled = false;
             if (ardReconnectCallback) {
                 clearTimeout(ardReconnectCallback);
                 ardReconnectCallback = null;
@@ -922,11 +1496,29 @@
             document.getElementById('noVNC_curtain_button').classList.add('noVNC_hidden');
             document.getElementById('noVNC_curtain_button').disabled = true;
             ardCloseCurtainPanel();
+            ardHpUiReset();
+            ardCloseTypeDialog();
             document.getElementById('noVNC_display_button').classList.add('noVNC_hidden');
             document.getElementById('noVNC_display_list').replaceChildren();
             ardCloseDisplayPanel();
             const wasConnected = UI.connected;
             const isARD = wasConnected && ardReconnectCredentials !== null;
+            const onVirtualDisplay = !!(UI.rfb && UI.rfb.ardOnVirtualDisplay && UI.rfb.ardOnVirtualDisplay());
+
+            // The connection was lost before High Performance had a
+            // picture, or soon after. The Mac may not know the mode and
+            // hang up on what it is sent, or end such sessions itself:
+            // either way the next connection must not go the same way.
+            const attempt = ardHpAttempt;
+            ardHpAttempt = null;
+            if (attempt && wasConnected && !ardInhibitReconnect &&
+                (attempt.streamingSince === null ||
+                 performance.now() - attempt.streamingSince < ardHpEarlyMs)) {
+                ardHpDisabled = true;
+                Log.Warn('ARD: connection lost ' + (attempt.streamingSince === null
+                    ? 'before High Performance started' : 'soon after High Performance started'));
+                ardNotice('The connection was lost in High Performance. Using Standard.', 'warn', 8000);
+            }
 
             if (isARD && !ardInhibitReconnect) {
                 // Circuit breaker: rapid disconnect loop detection
@@ -947,9 +1539,9 @@
                     return;
                 }
 
-                // Exponential backoff: 500ms, 1s, 2s, 5s, 10s cap
-                const delays = [500, 1000, 2000, 5000, 10000];
-                const delay = delays[Math.min(ardReconnectAttempt - 1, delays.length - 1)];
+                // Backs off; longer after a session on a virtual display,
+                // which a Mac needs time to take down
+                const delay = reconnectDelay(ardReconnectAttempt, onVirtualDisplay);
 
                 // Show reconnecting UI
                 UI.connected = false;
@@ -1156,6 +1748,18 @@
             </div>
             </div>
 
+            <!-- ARD sound (High Performance) -->
+            <button id="noVNC_audio_button" class="noVNC_button noVNC_icon_btn noVNC_hidden"
+                    title="Mute the Mac's sound">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+                    <path class="noVNC_audio_on" d="M15.5 8.5a5 5 0 0 1 0 7"/>
+                    <path class="noVNC_audio_on" d="M18.5 5.5a9 9 0 0 1 0 13"/>
+                    <path class="noVNC_audio_off" d="M22 9l-6 6"/>
+                    <path class="noVNC_audio_off" d="M16 9l6 6"/>
+                </svg>
+            </button>
+
             <!-- ARD display selector -->
             <button id="noVNC_display_button" class="noVNC_button noVNC_icon_btn noVNC_hidden"
                     title="Displays">
@@ -1251,6 +1855,13 @@
                                     <option value="1">Keystroke only</option>
                                 </select>
                             </li>
+                            <li>
+                                <label>
+                                    <input id="noVNC_setting_ardHpShowLocalCursor" type="checkbox"
+                                           class="toggle">
+                                    Show local cursor (High Performance)
+                                </label>
+                            </li>
                             <li><hr></li>
                             <li>
                                 <label for="noVNC_setting_repeaterID">Repeater ID:</label>
@@ -1341,6 +1952,8 @@
                     <tr><td>Displays</td><td id="ard_info_displays">—</td></tr>
                     <tr><td>Encryption</td><td id="ard_info_encryption">—</td></tr>
                     <tr><td>Quality</td><td id="ard_info_quality">—</td></tr>
+                    <tr id="ard_info_video_row" class="noVNC_hidden"><td>Video</td><td id="ard_info_video">—</td></tr>
+                    <tr id="ard_info_audio_row" class="noVNC_hidden"><td>Sound</td><td id="ard_info_audio">—</td></tr>
                     <tr><td>Mode</td><td id="ard_info_mode">—</td></tr>
                     <tr><td>Session</td><td id="ard_info_session">—</td></tr>
                     <tr><td>Remote User</td><td id="ard_info_user">—</td></tr>
@@ -1422,22 +2035,48 @@
     </form></div>
     </div>
 
-    <!-- ARD Session Select Dialog -->
-    <div id="noVNC_ard_session_dlg" class="noVNC_panel">
+    <!-- ARD Session Choice Dialog -->
+    <div id="noVNC_ard_type_dlg" class="noVNC_panel">
         <div class="noVNC_heading" style="display:flex;justify-content:space-between;align-items:center">
             Choose Session Type
-            <a href="#" id="noVNC_ard_session_disconnect"
+            <a href="#" id="noVNC_ard_type_disconnect"
                 style="color:rgba(255,255,255,0.7);text-decoration:none;font-size:1.1em;
                        line-height:1;padding:0 2px"
                 title="Disconnect">&times;</a>
         </div>
         <p class="noVNC_session_info"><strong><span id="noVNC_ard_session_username"></span></strong> is currently using the display on <strong><span id="noVNC_ard_session_hostname"></span></strong>.</p>
-        <p class="noVNC_session_auth" style="margin:0;font-size:0.85em;color:#666;text-align:right">Connecting as <strong><span id="noVNC_ard_session_authuser"></span></strong></p>
+        <p class="noVNC_session_auth" style="margin:0;font-size:0.85em;color:#666;text-align:right">Connected as <strong><span id="noVNC_ard_session_authuser"></span></strong></p>
+        <label class="noVNC_ard_type_row">
+            <input type="radio" name="ard_display" value="share">
+            <span><strong>Share Display</strong>
+                <small>See and control what is on the Mac's own screens</small></span>
+        </label>
+        <label class="noVNC_ard_type_row">
+            <input type="radio" name="ard_display" value="virtual">
+            <span><strong>Virtual Display</strong>
+                <small>A display the Mac makes for this session</small></span>
+        </label>
+        <div id="noVNC_ard_type_quality">
+            <label class="noVNC_ard_type_row">
+                <input type="radio" name="ard_quality" value="highperf">
+                <span><strong>High Performance</strong>
+                    <small id="noVNC_ard_type_hp_note"></small></span>
+            </label>
+            <label class="noVNC_ard_type_row" id="noVNC_ard_type_resize_row"
+                   style="margin-left:1.6em">
+                <input type="checkbox" id="noVNC_ard_type_resize">
+                <span><strong>Resize to window</strong>
+                    <small>Display follows the window, sharp at any size</small></span>
+            </label>
+            <label class="noVNC_ard_type_row">
+                <input type="radio" name="ard_quality" value="standard">
+                <span><strong>Standard</strong>
+                    <small>Works with most network conditions</small></span>
+            </label>
+        </div>
         <div class="button_row">
-            <button id="noVNC_ard_session_share_button" class="noVNC_submit">
-                Share Display</button>
-            <button id="noVNC_ard_session_virtual_button">
-                Virtual Display</button>
+            <button id="noVNC_ard_type_cancel">Disconnect</button>
+            <button id="noVNC_ard_type_continue" class="noVNC_submit">Continue</button>
         </div>
     </div>
 

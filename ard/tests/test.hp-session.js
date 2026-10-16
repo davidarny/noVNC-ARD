@@ -1,0 +1,967 @@
+/*
+ * Unit tests for the High Performance session and the HEVC helpers.
+ * A fake media socket, a fake sink and fake timers stand in for the browser;
+ * the negotiation, SRTP, assembler and feedback code is the real thing.
+ * All data here is synthetic.
+ *
+ * Run: node --test ard/tests/test.hp-session.js
+ */
+
+import { describe, it, beforeEach, afterEach, mock } from 'node:test';
+import { deepStrictEqual, strictEqual, ok } from 'node:assert';
+
+import * as protobuf from '../hp/protobuf.js';
+import * as plist from '../hp/plist.js';
+import { deflate } from '../hp/zlib.js';
+import { createContext } from '../hp/srtp.js';
+import { splitKeyBlock } from '../hp/negotiation.js';
+import { pictureAck } from '../hp/feedback.js';
+import { HpSession, CHANNEL_AUDIO, CHANNEL_VIDEO } from '../hp/session.js';
+import { codecFromAnnexB, splitAnnexB, DEFAULT_CODEC } from '../hp/hevc.js';
+import { overlayGeometry } from '../hp/video-sink.js';
+
+const SERVER_AUDIO_SSRC = 0x579aea87;
+const SERVER_VIDEO_SSRC = 0x12671595;
+
+function u16(n) { return [(n >> 8) & 0xff, n & 0xff]; }
+function u32(n) { return [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff]; }
+function ascii(s) { return Array.from(s, c => c.charCodeAt(0)); }
+
+// Let pending promises (WebCrypto, CompressionStream) run. They finish on
+// other threads, so how many turns that takes depends on the machine's load.
+async function settle(rounds = 60) {
+    for (let i = 0; i < rounds; i++) {
+        await new Promise(resolve => setImmediate(resolve));
+    }
+}
+
+// Wait for something that must happen.
+async function until(condition, what = 'condition') {
+    for (let i = 0; i < 20000 && !condition(); i++) {
+        await new Promise(resolve => setImmediate(resolve));
+    }
+    ok(condition(), 'timed out waiting for ' + what);
+}
+
+class FakeWebSocket {
+    constructor(url, protocol) {
+        this.url = url;
+        this.protocol = FakeWebSocket.refuseProtocol ? '' : protocol;
+        this.sent = [];
+        this.closed = false;
+        FakeWebSocket.last = this;
+    }
+
+    open() { this.onopen && this.onopen(); }
+    send(data) { this.sent.push(new Uint8Array(data)); }
+    close() { this.closed = true; }
+    serverClose() { this.onclose && this.onclose({}); }
+
+    deliver(channel, packet) {
+        const msg = new Uint8Array(packet.length + 1);
+        msg[0] = channel;
+        msg.set(packet, 1);
+        this.onmessage && this.onmessage({ data: msg.buffer });
+    }
+}
+
+function message1() {
+    const strings = ['Macmini9,1', 'unknown', 'unknown'];
+    const body = [
+        ...u16(2), 0, 0, 0, 1, 0, 0, 0, 0,
+        ...strings.flatMap(s => u16(s.length + 1)),
+        ...strings.flatMap(s => [...ascii(s), 0]),
+        0, 0, 0, 0,
+    ];
+    return new Uint8Array([...u16(body.length), ...body]);
+}
+
+async function answerStream(fields) {
+    return plist.encode({
+        avcMediaStreamNegotiatorMediaBlob: await deflate(protobuf.encode(fields)),
+        avcMediaStreamOptionRemoteEndpointInfo: protobuf.encode([{ field: 1, value: 0 }]),
+    });
+}
+
+async function answer() {
+    const audio = await answerStream([
+        { field: 3, value: protobuf.encode([{ field: 1, value: SERVER_AUDIO_SSRC }]) },
+    ]);
+    const video = await answerStream([
+        { field: 5, value: protobuf.encode([
+            { field: 1, value: SERVER_VIDEO_SSRC },
+            { field: 4, value: 3840 },
+            { field: 5, value: 2160 },
+            { field: 6, value: 4 },
+        ]) },
+    ]);
+    const body = [
+        ...u16(2), ...u16(2), 0, 0, 0, 1,
+        ...u16(audio.length), ...u16(video.length), 0, 0, 0, 0, 0, 0,
+        ...audio, ...video,
+    ];
+    return new Uint8Array([...u16(body.length), ...body]);
+}
+
+// An answer with chosen SSRCs and picture size, for a re-offer.
+async function answerWith({ audioSsrc, videoSsrc, width, height, stripes }) {
+    const audio = await answerStream([
+        { field: 3, value: protobuf.encode([{ field: 1, value: audioSsrc }]) },
+    ]);
+    const video = await answerStream([
+        { field: 5, value: protobuf.encode([
+            { field: 1, value: videoSsrc },
+            { field: 4, value: width },
+            { field: 5, value: height },
+            { field: 6, value: stripes },
+        ]) },
+    ]);
+    const body = [
+        ...u16(2), ...u16(2), 0, 0, 0, 1,
+        ...u16(audio.length), ...u16(video.length), 0, 0, 0, 0, 0, 0,
+        ...audio, ...video,
+    ];
+    return new Uint8Array([...u16(body.length), ...body]);
+}
+
+// The server's ports notice (rectangle 1010, field 0001), which precedes a
+// negotiation.
+const PORTS_NOTICE = new Uint8Array([
+    0x00, 0x24, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x17, 0x0c, 0x00, 0x00, 0x00, 0x01,
+    0x17, 0x0d, 0x00, 0x00, 0x00, 0x01, ...new Array(16).fill(0)]);
+
+// The key blocks out of a 0x1c message.
+function keysFromOffer(offer) {
+    const view = new DataView(offer.buffer, offer.byteOffset);
+    const audioSize = view.getUint16(10);
+    return {
+        audio: splitKeyBlock(offer.slice(36, 128)),
+        video: splitKeyBlock(offer.slice(128 + audioSize, 220 + audioSize)),
+    };
+}
+
+// A one-packet key picture for a stripe: parameter sets and an IDR slice
+// aggregated, as the server starts each stream.
+function keyPicturePacket({ stripe, seq, don, frame }) {
+    const nals = [
+        [0x40, 0x01, 0xaa], [0x42, 0x01, 0xbb], [0x44, 0x01, 0xcc],
+        [stripe === 0 ? 0x28 : 0x02, 0x01, 0xd0 + stripe, 1, 2, 3],
+    ];
+    const payload = [0x60, 0x01, ...u16(don), ...nals.flatMap(n => [...u16(n.length), ...n])];
+    return new Uint8Array([
+        0x90, 0x80 | 100, ...u16(seq), ...u32(frame * 400), ...u32(SERVER_VIDEO_SSRC + stripe),
+        0x93, 0x11, 0x00, 0x01, ...u16(1), ...u16(frame),
+        ...payload,
+    ]);
+}
+
+function audioPacket(seq) {
+    return new Uint8Array([
+        0x80, 101, ...u16(seq), ...u32(seq * 480), ...u32(SERVER_AUDIO_SSRC),
+        0x00, 0x68, 0x34, 0x00,
+    ]);
+}
+
+describe('HEVC helpers', () => {
+    it('names a Range Extensions stream for WebCodecs from its VPS', () => {
+        const vps = Buffer.from('40010c01ffff240800000300be08000003000099043024', 'hex');
+        const data = new Uint8Array([0, 0, 0, 1, ...vps, 0, 0, 0, 1, 0x42, 0x01, 0x01]);
+        strictEqual(codecFromAnnexB(data), 'hev1.4.10.H153.BE.08');
+        strictEqual(DEFAULT_CODEC, 'hev1.4.10.H153.BE.08');
+    });
+
+    it('names a Main profile stream', () => {
+        const vps = Buffer.from('40010c01ffff01600000030090000003000003005d959809', 'hex');
+        strictEqual(codecFromAnnexB(new Uint8Array([0, 0, 0, 1, ...vps])), 'hev1.1.6.L93.90');
+    });
+
+    it('returns null without a readable VPS', () => {
+        strictEqual(codecFromAnnexB(new Uint8Array([0, 0, 0, 1, 0x42, 0x01, 0x01])), null);
+        strictEqual(codecFromAnnexB(new Uint8Array([0, 0, 0, 1, 0x40, 0x01, 0x0c])), null);
+        strictEqual(codecFromAnnexB(new Uint8Array(0)), null);
+    });
+
+    it('splits Annex B on three- and four-byte start codes', () => {
+        const nals = splitAnnexB(new Uint8Array([0, 0, 0, 1, 9, 8, 0, 0, 1, 7, 0, 0, 0, 1, 6, 5, 4]));
+        deepStrictEqual(nals.map(n => Array.from(n)), [[9, 8], [7], [6, 5, 4]]);
+    });
+});
+
+describe('Overlay geometry', () => {
+    const none = { top: 0, right: 0, bottom: 0, left: 0 };
+    const box = { left: 10, top: 20, width: 960, height: 540 };
+
+    it('covers the canvas when the canvas shows the whole framebuffer', () => {
+        const view = { x: 0, y: 0, w: 1920, h: 1080, fbWidth: 1920, fbHeight: 1080 };
+        deepStrictEqual(overlayGeometry(box, view),
+                        { left: 10, top: 20, width: 960, height: 540, clip: none });
+    });
+
+    it('covers the canvas when nothing is known about the view', () => {
+        const covering = { left: 10, top: 20, width: 960, height: 540, clip: none };
+        deepStrictEqual(overlayGeometry(box, null), covering);
+        deepStrictEqual(overlayGeometry(box, { x: 0, y: 0, w: 0, h: 0, fbWidth: 0, fbHeight: 0 }), covering);
+    });
+
+    it('shows the part a clipped canvas shows, at the scale it shows it', () => {
+        // An unscaled 960x540 window onto the middle of a 1920x1080 framebuffer.
+        const view = { x: 400, y: 300, w: 960, h: 540, fbWidth: 1920, fbHeight: 1080 };
+        const g = overlayGeometry(box, view);
+        deepStrictEqual(g, {
+            left: 10 - 400, top: 20 - 300, width: 1920, height: 1080,
+            clip: { top: 300, right: 1920 - 1360, bottom: 1080 - 840, left: 400 },
+        });
+        // Framebuffer point (400, 300) is at the canvas's top left corner,
+        // and the visible part is exactly the canvas.
+        strictEqual(g.left + g.clip.left, box.left);
+        strictEqual(g.top + g.clip.top, box.top);
+        strictEqual(g.width - g.clip.left - g.clip.right, box.width);
+        strictEqual(g.height - g.clip.top - g.clip.bottom, box.height);
+    });
+
+    it('follows a clipped view that is also scaled', () => {
+        // The same window shown at half size.
+        const view = { x: 400, y: 300, w: 960, h: 540, fbWidth: 1920, fbHeight: 1080 };
+        const g = overlayGeometry({ left: 0, top: 0, width: 480, height: 270 }, view);
+        deepStrictEqual(g, {
+            left: -200, top: -150, width: 960, height: 540,
+            clip: { top: 150, right: 280, bottom: 120, left: 200 },
+        });
+    });
+
+    it('clips nothing past the framebuffer edge', () => {
+        const view = { x: 960, y: 540, w: 960, h: 540, fbWidth: 1920, fbHeight: 1080 };
+        const g = overlayGeometry(box, view);
+        strictEqual(g.clip.right, 0);
+        strictEqual(g.clip.bottom, 0);
+    });
+});
+
+describe('High Performance session', () => {
+    let states, offers, sinks, session, ws, resizes;
+
+    function create(extra = {}) {
+        states = [];
+        offers = [];
+        sinks = [];
+        resizes = [];
+        session = new HpSession(Object.assign({
+            mediaUrl: 'ws://relay.test/media',
+            WebSocketImpl: FakeWebSocket,
+            now: () => Date.now(),
+            sendOffer: bytes => offers.push(bytes),
+            onState: (state, reason) => states.push(reason ? state + ':' + reason : state),
+            onResize: (active) => resizes.push(active),
+            createSink: (opts) => {
+                const sink = { opts, pictures: [], closed: false,
+                               push(p) { this.pictures.push(p); }, close() { this.closed = true; } };
+                sinks.push(sink);
+                return sink;
+            },
+        }, extra));
+        session.start();
+        ws = FakeWebSocket.last;
+        return session;
+    }
+
+    // Bring a session to 'waiting': media channel open, offer sent, answer in.
+    async function negotiate(extra) {
+        create(extra);
+        ws.open();
+        session.handleMessage1(message1());
+        await until(() => offers.length === 1, 'the offer');
+        session.handleAnswer(await answer());
+        await until(() => session.state !== 'offering', 'the answer to be handled');
+        return keysFromOffer(offers[0]);
+    }
+
+    beforeEach(() => {
+        mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+    });
+
+    afterEach(() => {
+        if (session) session.close();
+        mock.timers.reset();
+    });
+
+    it('opens the media channel at the URL it is given', () => {
+        create();
+        strictEqual(ws.url, 'ws://relay.test/media');
+        strictEqual(session.state, 'idle');
+    });
+
+    it('sends the offer only when the server has asked and the media channel is open', async () => {
+        create();
+        session.handleMessage1(message1());
+        await settle();
+        strictEqual(offers.length, 0);
+        ws.open();
+        await until(() => offers.length === 1, 'the offer');
+        strictEqual(offers[0][0], 0x1c);
+        strictEqual(session.state, 'offering');
+
+        // The other order.
+        create();
+        ws.open();
+        await settle();
+        strictEqual(offers.length, 0);
+        session.handleMessage1(message1());
+        await until(() => offers.length === 1, 'the offer');
+    });
+
+    it('holds the offer until the connection is encrypted', async () => {
+        create({ holdOffer: true });
+        ws.open();
+        session.handleMessage1(message1());
+        await settle();
+        strictEqual(offers.length, 0);
+        strictEqual(session.state, 'idle');
+        session.releaseOffer();
+        await until(() => offers.length === 1, 'the offer');
+        strictEqual(session.state, 'offering');
+
+        // Released before the server asks: nothing is sent early.
+        create({ holdOffer: true });
+        ws.open();
+        session.releaseOffer();
+        await settle();
+        strictEqual(offers.length, 0);
+        session.handleMessage1(message1());
+        await until(() => offers.length === 1, 'the offer');
+    });
+
+    it('fails, sending no offer, when the connection is never encrypted', async () => {
+        create({ holdOffer: true });
+        ws.open();
+        session.handleMessage1(message1());
+        await settle();
+        mock.timers.tick(5000);
+        deepStrictEqual(states, ['failed:no-encryption']);
+        session.releaseOffer();
+        await settle();
+        strictEqual(offers.length, 0);
+    });
+
+    it('sends one offer however often Message 1 arrives', async () => {
+        create();
+        ws.open();
+        session.handleMessage1(message1());
+        session.handleMessage1(message1());
+        await settle();
+        session.handleMessage1(message1());
+        await settle();
+        strictEqual(offers.length, 1);
+    });
+
+    it('refuses an endpoint that is not a media channel', () => {
+        FakeWebSocket.refuseProtocol = true;
+        try {
+            create();
+            ws.open();
+            deepStrictEqual(states, ['failed:media-connect']);
+            strictEqual(session.failure, 'media-connect: not a media channel');
+        } finally {
+            FakeWebSocket.refuseProtocol = false;
+        }
+    });
+
+    it('asks the endpoint for the media subprotocol', () => {
+        create();
+        strictEqual(ws.protocol, 'ard-media');
+    });
+
+    it('fails when the media channel does not open', () => {
+        create();
+        mock.timers.tick(3000);
+        deepStrictEqual(states, ['failed:media-connect']);
+        ok(ws.closed);
+    });
+
+    it('fails when the server never opens the negotiation', () => {
+        create();
+        ws.open();
+        mock.timers.tick(5000);
+        deepStrictEqual(states, ['failed:no-message1']);
+    });
+
+    it('fails on a malformed Message 1', () => {
+        create();
+        ws.open();
+        session.handleMessage1(new Uint8Array([0, 9, 1, 2]));
+        deepStrictEqual(states, ['failed:bad-message1']);
+    });
+
+    it('fails when no answer follows the offer', async () => {
+        create();
+        ws.open();
+        session.handleMessage1(message1());
+        await until(() => offers.length === 1, 'the offer');
+        mock.timers.tick(5000);
+        deepStrictEqual(states, ['offering', 'failed:no-answer']);
+    });
+
+    it('does not take the ports notice for an answer', async () => {
+        create();
+        ws.open();
+        session.handleMessage1(message1());
+        await until(() => offers.length === 1, 'the offer');
+        session.handleAnswer(new Uint8Array([
+            0x00, 0x24, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x17, 0x0c, 0x00, 0x00, 0x00, 0x01,
+            0x17, 0x0d, 0x00, 0x00, 0x00, 0x01, ...new Array(16).fill(0)]));
+        await settle();
+        strictEqual(session.state, 'offering');
+        session.handleAnswer(await answer());
+        await until(() => session.state !== 'offering', 'the answer to be handled');
+        strictEqual(session.state, 'waiting');
+    });
+
+    it('fails on an answer it cannot read', async () => {
+        create();
+        ws.open();
+        session.handleMessage1(message1());
+        await settle();
+        session.handleAnswer(new Uint8Array([0, 30, ...new Array(30).fill(7)]));
+        await until(() => session.state === 'failed', 'the failure');
+        deepStrictEqual(states, ['offering', 'failed:bad-answer']);
+    });
+
+    it('creates the sink from the answer and waits for a picture', async () => {
+        await negotiate();
+        deepStrictEqual(states, ['offering', 'waiting']);
+        strictEqual(sinks.length, 1);
+        strictEqual(sinks[0].opts.width, 3840);
+        strictEqual(sinks[0].opts.height, 2160);
+        strictEqual(sinks[0].opts.stripes, 4);
+    });
+
+    it('fails when no picture follows the answer, and closes the sink', async () => {
+        await negotiate();
+        mock.timers.tick(5000);
+        deepStrictEqual(states, ['offering', 'waiting', 'failed:no-picture']);
+        ok(sinks[0].closed);
+    });
+
+    it('decrypts video, hands pictures to the sink in order and acknowledges them', async () => {
+        const keys = await negotiate();
+        const server = await createContext(keys.video.fromServer.key, keys.video.fromServer.salt);
+        const reader = await createContext(keys.video.toServer.key, keys.video.toServer.salt);
+
+        // Stripe 1 arrives before the key picture of stripe 0.
+        const p1 = await server.protectRtp(keyPicturePacket({ stripe: 1, seq: 500, don: 1001, frame: 7 }));
+        const p0 = await server.protectRtp(keyPicturePacket({ stripe: 0, seq: 100, don: 1000, frame: 7 }));
+        ws.deliver(CHANNEL_VIDEO, p1);
+        await settle();
+        strictEqual(sinks[0].pictures.length, 0);
+        ws.deliver(CHANNEL_VIDEO, p0);
+        await until(() => sinks[0].pictures.length === 2 && ws.sent.length === 2, 'two pictures and their acknowledgements');
+
+        deepStrictEqual(sinks[0].pictures.map(p => [p.don & 0xffff, p.stripe, p.key]),
+                        [[1000, 0, true], [1001, 1, false]]);
+        strictEqual(session.stats.videoPackets, 2);
+        strictEqual(session.stats.pictures, 2);
+        strictEqual(session.stats.authFailures, 0);
+
+        // Two acknowledgements went out, in order, readable with our key.
+        const ourSsrc = session._secrets.videoSsrc;
+        const acks = [];
+        for (const msg of ws.sent) {
+            strictEqual(msg[0], CHANNEL_VIDEO);
+            const plain = await reader.unprotectRtcp(msg.subarray(1));
+            ok(plain, 'our RTCP verifies');
+            acks.push(Buffer.from(plain).toString('hex'));
+        }
+        deepStrictEqual(acks, [
+            Buffer.from(pictureAck({ ssrc: ourSsrc, don: 1000 })).toString('hex'),
+            Buffer.from(pictureAck({ ssrc: ourSsrc, don: 1001 })).toString('hex'),
+        ]);
+
+        // The sink reports its first frame: now streaming.
+        sinks[0].opts.onFirstFrame();
+        deepStrictEqual(states, ['offering', 'waiting', 'streaming']);
+
+        // The limit for a first picture no longer applies. (Sound keeps
+        // arriving, as it does from a server that is still sending.)
+        const audio = await createContext(keys.audio.fromServer.key, keys.audio.fromServer.salt);
+        for (let seq = 0; seq < 3; seq++) {
+            ws.deliver(CHANNEL_AUDIO, await audio.protectRtp(audioPacket(seq)));
+            await until(() => session.stats.audioPackets === seq + 1, 'the audio packet');
+            mock.timers.tick(2400);
+        }
+        strictEqual(session.state, 'streaming');
+    });
+
+    it('ends at once on video that is not HEVC', async () => {
+        const keys = await negotiate();
+        const server = await createContext(keys.video.fromServer.key, keys.video.fromServer.salt);
+        // payload type 123, as an Intel Mac sends
+        const packet = new Uint8Array([
+            0x90, 0x80 | 123, ...u16(40), ...u32(0), ...u32(SERVER_VIDEO_SSRC),
+            0x93, 0x11, 0x00, 0x01, ...u16(1), ...u16(9),
+            0x3d, 0xc5, ...u16(0), 0x88, 0x84, 0x21,
+        ]);
+        ws.deliver(CHANNEL_VIDEO, await server.protectRtp(packet));
+        await until(() => session.state === 'failed', 'the failure');
+
+        strictEqual(states[states.length - 1], 'failed:unsupported-video');
+        strictEqual(session.failure, 'unsupported-video: payload type 123');
+        strictEqual(sinks[0].pictures.length, 0);
+        ok(sinks[0].closed);
+    });
+
+    it('sends rate control every 50 ms and reports every second', async () => {
+        const keys = await negotiate();
+        const videoIn = await createContext(keys.video.fromServer.key, keys.video.fromServer.salt);
+        const audioIn = await createContext(keys.audio.fromServer.key, keys.audio.fromServer.salt);
+        const videoReader = await createContext(keys.video.toServer.key, keys.video.toServer.salt);
+        const audioReader = await createContext(keys.audio.toServer.key, keys.audio.toServer.salt);
+
+        ws.deliver(CHANNEL_VIDEO, await videoIn.protectRtp(keyPicturePacket({ stripe: 0, seq: 100, don: 5, frame: 1 })));
+        ws.deliver(CHANNEL_AUDIO, await audioIn.protectRtp(audioPacket(4242)));
+        await until(() => session.stats.audioPackets === 1 && session.stats.pictures === 1 && ws.sent.length === 1, 'the first packets');
+        sinks[0].opts.onFirstFrame();
+        strictEqual(session.stats.audioPackets, 1);
+        ws.sent.length = 0;
+
+        for (let i = 0; i < 20; i++) {
+            mock.timers.tick(50);
+            await settle(4);
+        }
+        await until(() => ws.sent.length === 22, 'twenty rate reports and two receiver reports');
+
+        const kinds = { rctl: 0, videoReport: 0, audioReport: 0 };
+        for (const msg of ws.sent) {
+            const reader = msg[0] === CHANNEL_VIDEO ? videoReader : audioReader;
+            const plain = await reader.unprotectRtcp(msg.subarray(1));
+            ok(plain, 'our RTCP verifies');
+            if (plain[1] === 204 && String.fromCharCode(...plain.subarray(8, 12)) === 'RCTL') kinds.rctl++;
+            else if (plain[1] === 201 && msg[0] === CHANNEL_VIDEO) {
+                kinds.videoReport++;
+                strictEqual(new DataView(plain.buffer, plain.byteOffset).getUint32(8), SERVER_VIDEO_SSRC);
+                strictEqual(new DataView(plain.buffer, plain.byteOffset).getUint32(16), 100);
+            } else if (plain[1] === 201) {
+                kinds.audioReport++;
+                strictEqual(new DataView(plain.buffer, plain.byteOffset).getUint32(8), SERVER_AUDIO_SSRC);
+                strictEqual(new DataView(plain.buffer, plain.byteOffset).getUint32(16), 4242);
+            }
+        }
+        deepStrictEqual(kinds, { rctl: 20, videoReport: 1, audioReport: 1 });
+    });
+
+    it('sends only the feedback it is told to', async () => {
+        const keys = await negotiate({ feedback: { reports: false, acks: false, rateControl: false } });
+        const videoIn = await createContext(keys.video.fromServer.key, keys.video.fromServer.salt);
+        ws.deliver(CHANNEL_VIDEO, await videoIn.protectRtp(keyPicturePacket({ stripe: 0, seq: 1, don: 9, frame: 1 })));
+        await settle();
+        sinks[0].opts.onFirstFrame();
+        mock.timers.tick(1200);
+        await settle();
+        strictEqual(sinks[0].pictures.length, 1);
+        strictEqual(ws.sent.length, 0);
+    });
+
+    it('counts and drops datagrams that do not verify, and survives junk', async () => {
+        const keys = await negotiate();
+        const videoIn = await createContext(keys.video.fromServer.key, keys.video.fromServer.salt);
+        const good = await videoIn.protectRtp(keyPicturePacket({ stripe: 0, seq: 1, don: 9, frame: 1 }));
+        const bad = good.slice();
+        bad[20] ^= 0x01;
+
+        ws.deliver(CHANNEL_VIDEO, bad);
+        ws.deliver(CHANNEL_VIDEO, new Uint8Array([1, 2, 3]));
+        ws.deliver(7, good);
+        ws.onmessage({ data: new ArrayBuffer(0) });
+        await until(() => session.stats.authFailures === 1, 'the rejected datagram');
+        await settle();
+        strictEqual(sinks[0].pictures.length, 0);
+        strictEqual(session.state, 'waiting');
+
+        ws.deliver(CHANNEL_VIDEO, good);
+        await until(() => sinks[0].pictures.length === 1, 'the picture');
+    });
+
+    it('fails once when the media channel closes, and stops its timers', async () => {
+        await negotiate();
+        sinks[0].opts.onFirstFrame();
+        ws.sent.length = 0;
+        ws.serverClose();
+        deepStrictEqual(states, ['offering', 'waiting', 'streaming', 'failed:media-closed']);
+        ok(sinks[0].closed);
+        mock.timers.tick(10000);
+        await settle();
+        strictEqual(ws.sent.length, 0);
+        strictEqual(states.filter(s => s.startsWith('failed')).length, 1);
+    });
+
+    it('fails when the sink reports a decoder error', async () => {
+        await negotiate();
+        sinks[0].opts.onError('boom');
+        deepStrictEqual(states, ['offering', 'waiting', 'failed:decoder']);
+        strictEqual(session.failure, 'decoder: boom');
+    });
+
+    it('recovers from a stall by re-offering, and falls back only if that brings nothing', async () => {
+        const keys = await negotiate();
+        const videoIn = await createContext(keys.video.fromServer.key, keys.video.fromServer.salt);
+        ws.deliver(CHANNEL_VIDEO, await videoIn.protectRtp(keyPicturePacket({ stripe: 0, seq: 1, don: 10, frame: 1 })));
+        // don 11 is lost; 12 arrives and waits.
+        ws.deliver(CHANNEL_VIDEO, await videoIn.protectRtp(keyPicturePacket({ stripe: 2, seq: 9, don: 12, frame: 1 })));
+        await until(() => session.stats.videoPackets === 2, 'both packets');
+        sinks[0].opts.onFirstFrame();
+        // The stall fires (fuse 200 ms): it re-offers instead of ending.
+        for (let i = 0; i < 8 && offers.length < 2; i++) { mock.timers.tick(50); await settle(2); }
+        await until(() => offers.length === 2, 'the recovery re-offer');
+        strictEqual(session.state, 'streaming');
+        // The recovery gets no answer: now it falls back.
+        mock.timers.tick(5000);
+        await settle();
+        strictEqual(session.state, 'failed');
+    });
+
+    // Let time pass as it does, one timer period at a time.
+    function pass(ms) {
+        for (let t = 0; t < ms; t += 50) mock.timers.tick(50);
+    }
+
+    it('does not fail for a backlog that clears, and recovers one that does not', async () => {
+        await negotiate();
+        sinks[0].opts.onFirstFrame();
+
+        // Behind for a moment, as when a stream starts.
+        sinks[0].backlog = 500;
+        pass(1900);
+        strictEqual(session.state, 'streaming');
+        sinks[0].backlog = 3;
+        pass(100);
+        sinks[0].backlog = 500;
+        pass(1900);
+        strictEqual(session.state, 'streaming');
+        strictEqual(offers.length, 1);
+
+        // Behind and staying there: it re-offers to recover, still streaming.
+        pass(200);
+        await settle();
+        strictEqual(offers.length, 2, 'the recovery re-offer');
+        strictEqual(session.state, 'streaming');
+        // No answer to the recovery: falls back.
+        pass(5000);
+        strictEqual(session.state, 'failed');
+    });
+
+    it('recovers when the picture freezes, then falls back if that brings nothing', async () => {
+        await negotiate();
+        sinks[0].opts.onFirstFrame();
+        strictEqual(session.state, 'streaming');
+        // No new picture completes: it re-offers to recover, still streaming.
+        pass(3100);
+        await settle();
+        strictEqual(offers.length, 2, 'the recovery re-offer');
+        strictEqual(session.state, 'streaming');
+        // No answer to the recovery: falls back.
+        pass(5000);
+        strictEqual(session.state, 'failed');
+    });
+
+    it('leaves a start without any packet to the first-picture limit', async () => {
+        await negotiate();
+        pass(4900);
+        strictEqual(session.state, 'waiting');
+        pass(200);
+        strictEqual(states[states.length - 1], 'failed:no-picture');
+    });
+
+    it('does not mind a backlog within what a decoder normally holds', async () => {
+        await negotiate();
+        sinks[0].opts.onFirstFrame();
+        sinks[0].backlog = 120;
+        pass(10000);
+        strictEqual(session.state, 'streaming');
+    });
+
+    it('hands audio packets to the audio pipeline once it is ready, and closes it', async () => {
+        const audio = { packets: [], closed: false, push(rtp) { this.packets.push(rtp.seq); }, close() { this.closed = true; } };
+        const keys = await negotiate({ createAudio: async () => audio });
+        const audioIn = await createContext(keys.audio.fromServer.key, keys.audio.fromServer.salt);
+        await settle();
+        ws.deliver(CHANNEL_AUDIO, await audioIn.protectRtp(audioPacket(7)));
+        ws.deliver(CHANNEL_AUDIO, await audioIn.protectRtp(audioPacket(8)));
+        await until(() => audio.packets.length === 2, 'two audio packets');
+        deepStrictEqual(audio.packets.sort(), [7, 8]);
+        session.close();
+        ok(audio.closed);
+    });
+
+    it('mutes the audio pipeline, whether asked before or after it is ready', async () => {
+        const audio = { muted: [], push() {}, setMuted(m) { this.muted.push(m); }, close() {} };
+        await negotiate({ createAudio: async () => audio, audioMuted: true });
+        await until(() => session.audioReady, 'audio');
+        deepStrictEqual(audio.muted, [true]);
+        session.setAudioMuted(false);
+        session.setAudioMuted(true);
+        deepStrictEqual(audio.muted, [true, false, true]);
+        deepStrictEqual(session.video, { ssrc: SERVER_VIDEO_SSRC, width: 3840, height: 2160, stripes: 4 });
+    });
+
+    it('carries on without sound when the audio pipeline cannot be made', async () => {
+        const keys = await negotiate({ createAudio: async () => { throw new Error('no AudioWorklet'); } });
+        const audioIn = await createContext(keys.audio.fromServer.key, keys.audio.fromServer.salt);
+        await settle();
+        ws.deliver(CHANNEL_AUDIO, await audioIn.protectRtp(audioPacket(7)));
+        await until(() => session.stats.audioPackets === 1, 'the audio packet');
+        strictEqual(session.state, 'waiting');
+    });
+
+    it('closes an audio pipeline that becomes ready after the session has ended', async () => {
+        let ready;
+        const audio = { closed: false, push() {}, close() { this.closed = true; } };
+        await negotiate({ createAudio: () => new Promise((resolve) => { ready = resolve; }) });
+        await until(() => typeof ready === 'function', 'audio creation to start');
+        session.close();
+        ready(audio);
+        await settle();
+        ok(audio.closed);
+    });
+
+    // ----- resize without reconnecting -----
+
+    // Bring a session to 'streaming'.
+    async function stream() {
+        const keys = await negotiate();
+        sinks[0].opts.onFirstFrame();
+        strictEqual(session.state, 'streaming');
+        return keys;
+    }
+
+    it('re-offers on resize, keeping the picture until the new one is ready', async () => {
+        await stream();
+        session.reoffer();
+        await until(() => offers.length === 2, 'the second offer');
+        strictEqual(offers[1][0], 0x1c);
+        // The session is still streaming the old picture.
+        strictEqual(session.state, 'streaming');
+        strictEqual(sinks.length, 1);
+        ok(!sinks[0].closed);
+
+        // The ports notice comes first and is not the answer.
+        session.handleAnswer(PORTS_NOTICE);
+        await settle();
+        strictEqual(sinks.length, 1);
+
+        // The answer: a new sink at the new size, the old one still open.
+        session.handleAnswer(await answerWith({
+            audioSsrc: 0x11112222, videoSsrc: 0x33334444, width: 2560, height: 1440, stripes: 4 }));
+        await until(() => sinks.length === 2, 'the new sink');
+        strictEqual(sinks[1].opts.width, 2560);
+        strictEqual(sinks[1].opts.height, 1440);
+        ok(!sinks[0].closed, 'old sink stays until the new picture');
+        strictEqual(session.state, 'streaming');
+
+        // The new picture arrives: the old sink is closed.
+        sinks[1].opts.onFirstPicture();
+        ok(sinks[0].closed, 'old sink closed on the new picture');
+        strictEqual(session.state, 'streaming');
+    });
+
+    it('routes media to the new stream after a resize', async () => {
+        await stream();
+        session.reoffer();
+        await until(() => offers.length === 2, 'the second offer');
+        const keys = keysFromOffer(offers[1]);
+        session.handleAnswer(await answerWith({
+            audioSsrc: 0x11112222, videoSsrc: 0x33334444, width: 2560, height: 1440, stripes: 4 }));
+        await until(() => sinks.length === 2, 'the new sink');
+        sinks[1].opts.onFirstPicture();
+
+        const server = await createContext(keys.video.fromServer.key, keys.video.fromServer.salt);
+        const p0 = await server.protectRtp(keyPicturePacket({ stripe: 0, seq: 100, don: 1000, frame: 7 }));
+        const before = session.stats.videoPackets;
+        ws.deliver(CHANNEL_VIDEO, p0);
+        await until(() => session.stats.videoPackets === before + 1, 'the packet on the new keys');
+        ok(sinks[1].pictures.length >= 0);
+    });
+
+    it('signals a resize while the new picture is on the way, and when it arrives', async () => {
+        await stream();
+        session.reoffer();
+        await until(() => offers.length === 2, 'the second offer');
+        deepStrictEqual(resizes, [true]);          // dim on
+        session.handleAnswer(await answerWith({
+            audioSsrc: 0x11112222, videoSsrc: 0x33334444, width: 2560, height: 1440, stripes: 4 }));
+        await until(() => sinks.length === 2, 'the new sink');
+        deepStrictEqual(resizes, [true]);          // still dimmed: no picture yet
+        sinks[1].opts.onFirstPicture();
+        deepStrictEqual(resizes, [true, false]);   // dim off when the picture shows
+    });
+
+    it('clears the resize signal if the re-offer is abandoned', async () => {
+        await stream();
+        session.reoffer();
+        await until(() => offers.length === 2, 'the second offer');
+        deepStrictEqual(resizes, [true]);
+        mock.timers.tick(5000);                    // no answer
+        deepStrictEqual(resizes, [true, false]);
+        strictEqual(session.state, 'streaming');
+    });
+
+    it('frees the old sink if the session is torn down mid-resize', async () => {
+        await stream();
+        session.reoffer();
+        await until(() => offers.length === 2, 'the second offer');
+        session.handleAnswer(await answerWith({
+            audioSsrc: 0x11112222, videoSsrc: 0x33334444, width: 2560, height: 1440, stripes: 4 }));
+        await until(() => sinks.length === 2, 'the new sink');
+        // The new picture has not arrived; the old sink is still held.
+        ok(!sinks[0].closed);
+        session.close();
+        ok(sinks[0].closed, 'the held old sink is closed on teardown');
+        ok(sinks[1].closed, 'the new sink is closed too');
+    });
+
+    it('does not start a second re-offer while one is in flight', async () => {
+        await stream();
+        session.reoffer();
+        await until(() => offers.length === 2, 'the second offer');
+        strictEqual(session.reoffering(), true);
+        session.reoffer();                 // ignored: one is already going
+        await settle();
+        strictEqual(offers.length, 2);
+        // Once it completes, a new one can go.
+        session.handleAnswer(await answerWith({
+            audioSsrc: 0x11112222, videoSsrc: 0x33334444, width: 2560, height: 1440, stripes: 4 }));
+        await until(() => sinks.length === 2, 'the new sink');
+        strictEqual(session.reoffering(), false);
+        session.reoffer();
+        await until(() => offers.length === 3, 'the third offer');
+    });
+
+    it('does not call the media silent during a resize switch', async () => {
+        await stream();
+        session.reoffer();
+        await until(() => offers.length === 2, 'the second offer');
+        // The server has stopped its media to switch size; no packets for
+        // longer than the silence window, but a re-offer is in flight.
+        mock.timers.tick(4000);
+        strictEqual(session.state, 'streaming');
+        strictEqual(session.reoffering(), true);
+    });
+
+    it('keeps streaming when a recovery re-offer is answered', async () => {
+        await stream();
+        session._streamingFail('media-stopped');
+        await until(() => offers.length === 2, 'the recovery re-offer');
+        strictEqual(session.state, 'streaming');
+        session.handleAnswer(await answerWith({
+            audioSsrc: 0x1111, videoSsrc: 0x2222, width: 1920, height: 1080, stripes: 4 }));
+        await until(() => sinks.length === 2, 'the new sink');
+        sinks[1].opts.onFirstPicture();
+        strictEqual(session.state, 'streaming');
+        ok(!sinks[1].closed);
+    });
+
+    it('falls back after too many recoveries in the window', async () => {
+        await stream();
+        for (let i = 0; i < 3; i++) {
+            const before = offers.length;
+            session._streamingFail('media-stopped');
+            await until(() => offers.length === before + 1, 'a recovery re-offer');
+            strictEqual(session.state, 'streaming');
+            session.handleAnswer(await answerWith({
+                audioSsrc: 0x1000 + i, videoSsrc: 0x2000 + i, width: 1920, height: 1080, stripes: 4 }));
+            await until(() => sinks.length === 2 + i, 'the new sink');
+            sinks[sinks.length - 1].opts.onFirstPicture();
+            strictEqual(session.state, 'streaming');
+        }
+        // The fourth glitch in the window is past the cap.
+        session._streamingFail('media-stopped');
+        await until(() => session.state === 'failed', 'the fall back');
+        strictEqual(session.failure.startsWith('media-stopped'), true);
+    });
+
+    it('ignores a glitch from the old stream while a recovery is in flight', async () => {
+        await stream();
+        session._streamingFail('media-stopped');
+        await until(() => offers.length === 2, 'the recovery re-offer');
+        strictEqual(session.reoffering(), true);
+        // The old assembler stalls mid-recovery: left to the re-offer, not fatal.
+        session._streamingFail('stalled', 'old picture');
+        await settle();
+        strictEqual(session.state, 'streaming');
+        strictEqual(offers.length, 2);
+        session.handleAnswer(await answerWith({
+            audioSsrc: 0x1, videoSsrc: 0x2, width: 1920, height: 1080, stripes: 4 }));
+        await until(() => sinks.length === 2, 'the new sink');
+        sinks[1].opts.onFirstPicture();
+        strictEqual(session.state, 'streaming');
+    });
+
+    it('a stale re-offer timer does not abort a later recovery', async () => {
+        await stream();
+        // Recovery 1, answered.
+        session._streamingFail('media-stopped');
+        await until(() => offers.length === 2, 'recovery 1');
+        session.handleAnswer(await answerWith({
+            audioSsrc: 0x1, videoSsrc: 0x2, width: 1920, height: 1080, stripes: 4 }));
+        await until(() => sinks.length === 2, 'sink 2');
+        sinks[1].opts.onFirstPicture();
+        strictEqual(session.state, 'streaming');
+        // A little later, recovery 2, slow to answer.
+        mock.timers.tick(200);
+        session._streamingFail('media-stopped');
+        await until(() => offers.length === 3, 'recovery 2');
+        strictEqual(session.reoffering(), true);
+        // Recovery 1's own 5 s timer now fires: it must not touch recovery 2.
+        mock.timers.tick(4900);
+        await settle();
+        strictEqual(session.state, 'streaming');
+        strictEqual(session.reoffering(), true);
+    });
+
+    it('recovers when video stops even though sound keeps arriving', async () => {
+        const keys = await negotiate();
+        const audio = await createContext(keys.audio.fromServer.key, keys.audio.fromServer.salt);
+        const videoIn = await createContext(keys.video.fromServer.key, keys.video.fromServer.salt);
+        // A video packet, then streaming.
+        ws.deliver(CHANNEL_VIDEO, await videoIn.protectRtp(keyPicturePacket({ stripe: 0, seq: 1, don: 1, frame: 1 })));
+        await until(() => session.stats.videoPackets === 1, 'the video packet');
+        sinks[0].opts.onFirstFrame();
+        strictEqual(session.state, 'streaming');
+        // Sound keeps coming; no more video. The all-media watchdog would stay
+        // fed by the audio, but the video watchdog catches the freeze.
+        for (let seq = 0; seq < 2; seq++) {
+            ws.deliver(CHANNEL_AUDIO, await audio.protectRtp(audioPacket(seq)));
+            await until(() => session.stats.audioPackets === seq + 1, 'the audio packet');
+            pass(1600);
+        }
+        await settle();
+        strictEqual(offers.length, 2, 'the recovery re-offer');
+        strictEqual(session.state, 'streaming');
+    });
+
+    it('does not re-offer unless it is streaming', async () => {
+        await negotiate();          // 'waiting', not yet streaming
+        session.reoffer();
+        await settle();
+        strictEqual(offers.length, 1);
+    });
+
+    it('keeps the old stream when a re-offer is not answered well', async () => {
+        await stream();
+        session.reoffer();
+        await until(() => offers.length === 2, 'the second offer');
+        session.handleAnswer(new Uint8Array([0, 30, ...new Array(30).fill(7)]));
+        await settle();
+        // The session did not fail; the old picture is still there.
+        strictEqual(session.state, 'streaming');
+        ok(!sinks[0].closed);
+        strictEqual(sinks.length, 1);
+    });
+
+    it('closes quietly', async () => {
+        await negotiate();
+        session.close();
+        deepStrictEqual(states, ['offering', 'waiting', 'closed']);
+        ok(sinks[0].closed);
+        ok(ws.closed);
+        mock.timers.tick(10000);
+        strictEqual(states.length, 3);
+    });
+});
